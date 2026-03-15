@@ -30,7 +30,8 @@ yarn-error.*
 .DS_Store
 *.pem
 
-# local env files
+# environment variables
+.env
 .env*.local
 
 # typescript
@@ -41,3 +42,13 @@ app-example
 # generated native folders
 /ios
 /android
+
+# Firebase Functions build output
+functions/lib/
+
+# Watchman
+.watchman-cookie-*
+**/.watchman-cookie-*
+
+# Claude
+.claude/
