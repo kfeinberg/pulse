@@ -19,9 +19,9 @@ CATEGORY RULES:
 - Temporary physical installations or experiences by a brand → "popup"
 
 "free_stuff":
-- Free classes, free museum days, free concerts, free movies, free food/drink tastings, giveaways
-- Community events, festivals, open houses, workshops, talks, tours
-- Ongoing exhibitions at established venues (museums, galleries)
+- ONLY use this category when free physical items are being given away: free food, free drinks, free samples, free merch, free products, giveaways
+- Do NOT classify an event as "free_stuff" just because attendance is free. A free exhibit, free concert, free class, or free museum day is NOT "free_stuff" — use a different category (e.g. "happening", "concerts")
+- The key distinction: "free_stuff" means you walk away with something tangible for free
 
 "bars":
 - Events at bars, pubs, taverns, cocktail lounges, rooftops, beer gardens
@@ -46,7 +46,7 @@ CATEGORY RULES:
 - Anything notable happening in the city that doesn't fit the other categories
 
 When in doubt and the title mentions "pop-up" or any brand activation, choose "popup".
-When in doubt, if there is specific mention of free things being given away at the event, choose "free_stuff".
+When in doubt, only choose "free_stuff" if free physical items (food, drinks, products, samples) are explicitly being given away. An event being free to attend does NOT make it "free_stuff".
 When in doubt between "clubs" and "concerts": if the event is DJ/electronic-focused, choose "clubs". If it features live bands/artists performing, choose "concerts".
 
 RECURRING / MULTI-DATE EVENTS:
@@ -60,6 +60,10 @@ Only include events that have a clear date. Skip any event where the date and ti
 OTHER:
 
 If you cannot determine the location of an event, do not include it.
+
+MULTI-LOCATION EVENTS:
+
+If an event takes place at multiple locations and the page lists those specific locations, create a SEPARATE event entry for each location with the same title, description, date, times, and category. If the page only says something vague like "multiple locations" without listing specifics, include the event once with whatever location text is given — it will be resolved separately.
 
 RESPONSE FORMAT:
 

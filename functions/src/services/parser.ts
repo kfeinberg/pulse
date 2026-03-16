@@ -55,6 +55,89 @@ export function stripHtml(html: string): string {
   return cleaned;
 }
 
+const VAGUE_LOCATION_PATTERNS = [
+  /multiple\s+(locations?|venues?|spots?|places?)/i,
+  /various\s+(locations?|venues?|spots?|places?)/i,
+  /several\s+(locations?|venues?|spots?|places?)/i,
+  /different\s+(locations?|venues?|spots?|places?)/i,
+  /locations?\s+across/i,
+  /see\s+(website|site|link)/i,
+  /check\s+(website|site|link)/i,
+  /tba|tbd/i,
+];
+
+function isVagueLocation(location: string): boolean {
+  if (!location || location.length < 3) return true;
+  return VAGUE_LOCATION_PATTERNS.some((p) => p.test(location));
+}
+
+async function resolveVagueLocations(
+  events: Array<{
+    title: string;
+    description: string;
+    date: string;
+    startTime: string;
+    endTime: string;
+    location: string;
+    category: string;
+  }>,
+  client: Anthropic
+): Promise<typeof events> {
+  const vagueEvents = events.filter((e) => isVagueLocation(e.location));
+  if (vagueEvents.length === 0) return events;
+
+  const specificEvents = events.filter((e) => !isVagueLocation(e.location));
+
+  // Ask Claude to resolve each vague location
+  for (const event of vagueEvents) {
+    try {
+      const message = await client.messages.create({
+        model: "claude-haiku-4-5-20251001",
+        max_tokens: 2048,
+        messages: [
+          {
+            role: "user",
+            content: `An event called "${event.title}" is described as being at "${event.location}" in New York City.
+
+Based on your knowledge, what are the specific locations (venue names and addresses) where this takes place in NYC? If this is a brand, business, or chain, list their NYC locations.
+
+Return ONLY a JSON array of location strings. Each string should be a specific venue name and address. If you don't know the specific locations, return an empty array [].
+
+Example: ["Joe's Pizza, 7 Carmine St, New York, NY", "Joe's Pizza, 150 E 14th St, New York, NY"]`,
+          },
+        ],
+      });
+
+      const text = message.content[0].type === "text" ? message.content[0].text : "";
+      const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
+
+      let locations: string[];
+      try {
+        locations = JSON.parse(cleaned);
+      } catch {
+        console.warn(`Failed to parse locations for "${event.title}":`, text);
+        specificEvents.push(event);
+        continue;
+      }
+
+      if (!Array.isArray(locations) || locations.length === 0) {
+        console.log(`No specific locations found for "${event.title}", skipping`);
+        continue;
+      }
+
+      console.log(`Resolved "${event.title}" to ${locations.length} locations`);
+      for (const loc of locations) {
+        specificEvents.push({ ...event, location: loc });
+      }
+    } catch (err) {
+      console.warn(`Location resolution failed for "${event.title}":`, err);
+      specificEvents.push(event);
+    }
+  }
+
+  return specificEvents;
+}
+
 async function sendToClaude(
   content: string,
   sourceName: string,
@@ -116,7 +199,10 @@ async function sendToClaude(
     return [];
   }
 
-  return parsed.map((e) => {
+  // Second pass: resolve vague multi-location events
+  const resolvedEvents = await resolveVagueLocations(parsed, client);
+
+  return resolvedEvents.map((e) => {
     const dateStr = e.date || new Date().toISOString().split("T")[0];
     const startTimeStr = e.startTime || "12:00";
     const endTimeStr = e.endTime || "23:59";
