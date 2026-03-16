@@ -1,9 +1,9 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert } from 'react-native';
+import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent } from 'react-native';
 import MapView, { Marker, Callout, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent } from '@/types';
-import { subscribeToActiveEvents, voteOnEvent } from '@/services/firebase';
+import { subscribeToUpcomingEvents, voteOnEvent } from '@/services/firebase';
 import { getAllVotes, setVote, VoteType } from '@/services/votes';
 import { CATEGORIES, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
 import { MAP_STYLE } from '@/constants/mapStyle';
@@ -17,6 +17,62 @@ export default function MapScreen() {
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
+  const [timelineIndex, setTimelineIndex] = useState(0);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const [trackWidth, setTrackWidth] = useState(0);
+
+  const timelineSnaps = useMemo(() => {
+    const snaps: { label: string; time: Date }[] = [];
+    const now = new Date();
+    const endTime = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+    snaps.push({ label: 'Now', time: now });
+
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+
+    // Generate 2-hour snaps for the next 72 hours
+    const firstSnap = new Date(now);
+    firstSnap.setMinutes(0, 0, 0);
+    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
+
+    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * 60 * 60 * 1000)) {
+      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / 86400000);
+      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
+
+      const h = d.getHours();
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      const ampm = h < 12 ? 'AM' : 'PM';
+      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
+    }
+    return snaps;
+  }, []);
+
+  const timelineTrackRef = useRef<View>(null);
+  const timelineTrackX = useRef(0);
+
+  const updateTimelineFromTouch = useCallback((pageX: number) => {
+    if (!trackWidth) return;
+    const x = pageX - timelineTrackX.current;
+    const fraction = Math.max(0, Math.min(1, x / trackWidth));
+    const index = Math.round(fraction * (timelineSnaps.length - 1));
+    setTimelineIndex(index);
+  }, [trackWidth, timelineSnaps.length]);
+
+  const handleTimelineGrant = useCallback((evt: GestureResponderEvent) => {
+    timelineTrackRef.current?.measureInWindow((x) => {
+      timelineTrackX.current = x;
+      updateTimelineFromTouch(evt.nativeEvent.pageX);
+    });
+  }, [updateTimelineFromTouch]);
+
+  const handleTimelineMove = useCallback((evt: GestureResponderEvent) => {
+    updateTimelineFromTouch(evt.nativeEvent.pageX);
+  }, [updateTimelineFromTouch]);
+
+  const handleTrackLayout = useCallback((evt: LayoutChangeEvent) => {
+    setTrackWidth(evt.nativeEvent.layout.width);
+  }, []);
 
   useEffect(() => {
     getAllVotes().then(setVotes).catch(() => {});
@@ -63,12 +119,14 @@ export default function MapScreen() {
     }
   }, [votes, events]);
 
+  const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
+
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
 
     try {
-      unsubscribe = subscribeToActiveEvents((activeEvents) => {
-        setEvents(activeEvents);
+      unsubscribe = subscribeToUpcomingEvents((upcoming) => {
+        setAllEvents(upcoming);
       });
     } catch (e) {
       console.warn('Firebase not configured yet:', e);
@@ -79,10 +137,27 @@ export default function MapScreen() {
     };
   }, []);
 
+  // Filter events based on selected timeline time
+  useEffect(() => {
+    const selectedTime = timelineSnaps[timelineIndex].time.getTime();
+    const filtered = allEvents.filter((event: any) => {
+      const started = event.startTime.toMillis() <= selectedTime;
+      const notEnded = event.endTime.toMillis() > selectedTime;
+      return started && notEnded;
+    });
+    setEvents(filtered);
+    // Clear selected event if it's no longer visible
+    setSelectedEvent((prev) => {
+      if (!prev) return null;
+      return filtered.find((e) => e.id === prev.id) ? prev : null;
+    });
+  }, [allEvents, timelineIndex, timelineSnaps]);
+
   const handleMapPress = useCallback((e: MapPressEvent) => {
     // Only dismiss if tapping the map itself, not a marker
     if (e.nativeEvent.action !== 'marker-press') {
       setSelectedEvent(null);
+      setTimelineOpen(false);
     }
   }, []);
 
@@ -225,6 +300,65 @@ export default function MapScreen() {
         </View>
       )}
 
+      {!timelineOpen ? (
+        <TouchableOpacity
+          style={styles.timelinePill}
+          onPress={() => setTimelineOpen(true)}
+          activeOpacity={0.8}
+        >
+          <View style={styles.timelinePillDot} />
+          <Text style={styles.timelinePillText}>
+            {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
+          </Text>
+        </TouchableOpacity>
+      ) : (
+        <View style={styles.timelineContainer}>
+          <View style={styles.timelineHeader}>
+            <Text style={styles.timelineLabel}>
+              {timelineSnaps[timelineIndex].label}
+            </Text>
+            <TouchableOpacity onPress={() => setTimelineOpen(false)}>
+              <Text style={styles.timelineClose}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <View
+            ref={timelineTrackRef}
+            style={styles.timelineTrack}
+            onLayout={handleTrackLayout}
+            onStartShouldSetResponder={() => true}
+            onMoveShouldSetResponder={() => true}
+            onResponderGrant={handleTimelineGrant}
+            onResponderMove={handleTimelineMove}
+          >
+            {timelineSnaps.map((snap, i) => {
+              const isActive = i === timelineIndex;
+              const isDay = snap.label.includes('12AM') || i === 0;
+              return (
+                <View
+                  key={i}
+                  style={[
+                    styles.timelineDotWrapper,
+                    { left: `${(i / (timelineSnaps.length - 1)) * 100}%` },
+                  ]}
+                >
+                  <View
+                    style={[
+                      styles.timelineDot,
+                      isActive && styles.timelineDotActive,
+                    ]}
+                  />
+                  {isDay && (
+                    <Text style={styles.timelineTickLabel}>
+                      {i === 0 ? 'Now' : snap.label.split(' ')[0]}
+                    </Text>
+                  )}
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
       <TouchableOpacity style={styles.adminButton} onPress={handleAdminPress}>
         <Text style={styles.adminButtonText}>{isAdmin ? '＋' : '⚙'}</Text>
       </TouchableOpacity>
@@ -353,6 +487,86 @@ const styles = StyleSheet.create({
   },
   floatingVoteCountActive: {
     color: '#fff',
+  },
+  timelinePill: {
+    position: 'absolute',
+    bottom: 100,
+    left: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    borderRadius: 20,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    gap: 8,
+  },
+  timelinePillDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#fff',
+  },
+  timelinePillText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  timelineContainer: {
+    position: 'absolute',
+    bottom: 100,
+    left: 16,
+    right: 16,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    borderRadius: 16,
+    paddingTop: 10,
+    paddingBottom: 8,
+    paddingHorizontal: 12,
+  },
+  timelineHeader: {
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  timelineLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+    flex: 1,
+    textAlign: 'center',
+  },
+  timelineClose: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 16,
+    paddingLeft: 8,
+  },
+  timelineTrack: {
+    height: 36,
+    position: 'relative',
+  },
+  timelineDotWrapper: {
+    position: 'absolute',
+    top: 0,
+    alignItems: 'center',
+    transform: [{ translateX: -6 }],
+  },
+  timelineDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  timelineDotActive: {
+    backgroundColor: '#fff',
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    marginTop: -2,
+  },
+  timelineTickLabel: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 9,
+    marginTop: 4,
   },
   adminButton: {
     position: 'absolute',

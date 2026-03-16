@@ -45,7 +45,7 @@ export async function addEvent(input: NewEventInput): Promise<string> {
   return docRef.id;
 }
 
-export function subscribeToActiveEvents(
+export function subscribeToUpcomingEvents(
   callback: (events: AppEvent[]) => void
 ): () => void {
   const now = Timestamp.now();
@@ -56,17 +56,11 @@ export function subscribeToActiveEvents(
   );
 
   const unsubscribe = onSnapshot(q, (snapshot) => {
-    const currentTime = Date.now();
     const events: AppEvent[] = snapshot.docs
       .map((doc) => ({
         id: doc.id,
         ...doc.data(),
-      }))
-      .filter((event: any) => {
-        const started = event.startTime.toMillis() <= currentTime;
-        const notEnded = event.endTime.toMillis() > currentTime;
-        return started && notEnded;
-      }) as AppEvent[];
+      })) as AppEvent[];
     callback(events);
   });
 

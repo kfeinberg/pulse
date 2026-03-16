@@ -1,0 +1,412 @@
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
+import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
+import { subscribeToUpcomingEvents } from './firebase';
+import { CATEGORIES } from './categories';
+import { MAP_STYLE } from './mapStyle';
+import { AppEvent } from './types';
+
+const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
+
+function formatTime(millis: number) {
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  const d = new Date(millis);
+  const h = d.getHours();
+  const hour = h % 12 || 12;
+  const ampm = h < 12 ? 'AM' : 'PM';
+  const min = d.getMinutes().toString().padStart(2, '0');
+  return `${months[d.getMonth()]} ${d.getDate()}, ${hour}:${min} ${ampm}`;
+}
+
+export function App() {
+  const { isLoaded } = useJsApiLoader({
+    googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
+  });
+
+  const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
+  const [events, setEvents] = useState<AppEvent[]>([]);
+  const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
+  const [timelineIndex, setTimelineIndex] = useState(0);
+  const [timelineOpen, setTimelineOpen] = useState(false);
+  const trackRef = useRef<HTMLDivElement>(null);
+
+  // Timeline snaps — every 2 hours for 72 hours
+  const timelineSnaps = useMemo(() => {
+    const snaps: { label: string; time: Date }[] = [];
+    const now = new Date();
+    const endTime = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+    snaps.push({ label: 'Now', time: now });
+
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+
+    const firstSnap = new Date(now);
+    firstSnap.setMinutes(0, 0, 0);
+    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
+
+    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * 60 * 60 * 1000)) {
+      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / 86400000);
+      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
+      const h = d.getHours();
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      const ampm = h < 12 ? 'AM' : 'PM';
+      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
+    }
+    return snaps;
+  }, []);
+
+  // Subscribe to Firestore
+  useEffect(() => {
+    const unsubscribe = subscribeToUpcomingEvents(setAllEvents);
+    return () => unsubscribe();
+  }, []);
+
+  // Filter by timeline
+  useEffect(() => {
+    const selectedTime = timelineSnaps[timelineIndex].time.getTime();
+    const filtered = allEvents.filter((event: any) => {
+      const started = event.startTime.toMillis() <= selectedTime;
+      const notEnded = event.endTime.toMillis() > selectedTime;
+      return started && notEnded;
+    });
+    setEvents(filtered);
+    setSelectedEvent((prev) => {
+      if (!prev) return null;
+      return filtered.find((e) => e.id === prev.id) ? prev : null;
+    });
+  }, [allEvents, timelineIndex, timelineSnaps]);
+
+  const handleTimelineDrag = useCallback((e: React.MouseEvent | React.TouchEvent) => {
+    if (!trackRef.current) return;
+    const rect = trackRef.current.getBoundingClientRect();
+    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
+    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const index = Math.round(fraction * (timelineSnaps.length - 1));
+    setTimelineIndex(index);
+  }, [timelineSnaps.length]);
+
+  const handleTrackMouseDown = useCallback((e: React.MouseEvent) => {
+    handleTimelineDrag(e);
+    const onMove = (ev: MouseEvent) => handleTimelineDrag(ev as any);
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+  }, [handleTimelineDrag]);
+
+  const handleTrackTouchStart = useCallback((e: React.TouchEvent) => {
+    handleTimelineDrag(e);
+  }, [handleTimelineDrag]);
+
+  if (!isLoaded) {
+    return <div style={styles.loading}>Loading map...</div>;
+  }
+
+  return (
+    <div style={styles.container}>
+      <GoogleMap
+        mapContainerStyle={styles.map}
+        center={NYC_CENTER}
+        zoom={13}
+        options={{
+          styles: MAP_STYLE,
+          disableDefaultUI: true,
+          zoomControl: true,
+        }}
+        onClick={() => {
+          setSelectedEvent(null);
+          setTimelineOpen(false);
+        }}
+      >
+        {events.map((event) => {
+          const category = CATEGORIES[event.category];
+          return (
+            <OverlayViewF
+              key={event.id}
+              position={{ lat: event.latitude, lng: event.longitude }}
+              mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+            >
+              <div
+                style={styles.markerWrapper}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedEvent(event);
+                }}
+              >
+                <div style={{ ...styles.marker, backgroundColor: category.color }}>
+                  <span style={styles.markerEmoji}>{category.emoji}</span>
+                </div>
+                <div style={{ ...styles.markerArrow, borderTopColor: category.color }} />
+              </div>
+            </OverlayViewF>
+          );
+        })}
+      </GoogleMap>
+
+      {/* Event preview card */}
+      {selectedEvent && (
+        <div style={styles.previewCard}>
+          <div style={styles.previewContent}>
+            <span style={styles.previewEmoji}>
+              {CATEGORIES[selectedEvent.category]?.emoji}
+            </span>
+            <div style={styles.previewText}>
+              <div style={styles.previewTitle}>{selectedEvent.title}</div>
+              {selectedEvent.location && (
+                <div style={styles.previewLocation}>{selectedEvent.location}</div>
+              )}
+              <div style={styles.previewTime}>
+                {formatTime(selectedEvent.startTime.toMillis())} —{' '}
+                {formatTime(selectedEvent.endTime.toMillis())}
+              </div>
+            </div>
+          </div>
+          {selectedEvent.description && (
+            <div style={styles.previewDescription}>{selectedEvent.description}</div>
+          )}
+        </div>
+      )}
+
+      {/* Timeline */}
+      {!timelineOpen ? (
+        <div style={styles.timelinePill} onClick={() => setTimelineOpen(true)}>
+          <div style={styles.timelinePillDot} />
+          <span style={styles.timelinePillText}>
+            {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
+          </span>
+        </div>
+      ) : (
+        <div style={styles.timelineContainer}>
+          <div style={styles.timelineHeader}>
+            <span style={styles.timelineLabel}>
+              {timelineSnaps[timelineIndex].label}
+            </span>
+            <span
+              style={styles.timelineClose}
+              onClick={() => setTimelineOpen(false)}
+            >
+              ✕
+            </span>
+          </div>
+          <div
+            ref={trackRef}
+            style={styles.timelineTrack}
+            onMouseDown={handleTrackMouseDown}
+            onTouchStart={handleTrackTouchStart}
+            onTouchMove={handleTimelineDrag}
+          >
+            {timelineSnaps.map((snap, i) => {
+              const isActive = i === timelineIndex;
+              const isDay = snap.label.includes('12AM') || i === 0;
+              const pct = (i / (timelineSnaps.length - 1)) * 100;
+              return (
+                <div key={i} style={{ ...styles.dotWrapper, left: `${pct}%` }}>
+                  <div
+                    style={{
+                      ...styles.dot,
+                      ...(isActive ? styles.dotActive : {}),
+                    }}
+                  />
+                  {isDay && (
+                    <span style={styles.tickLabel}>
+                      {i === 0 ? 'Now' : snap.label.split(' ')[0]}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const styles: Record<string, React.CSSProperties> = {
+  container: {
+    width: '100%',
+    height: '100%',
+    position: 'relative',
+  },
+  loading: {
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    height: '100%',
+    fontSize: 18,
+    color: '#999',
+  },
+  map: {
+    width: '100%',
+    height: '100%',
+  },
+  markerWrapper: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    cursor: 'pointer',
+    transform: 'translate(-50%, -100%)',
+  },
+  marker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    border: '2px solid #fff',
+    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+  },
+  markerEmoji: {
+    fontSize: 20,
+  },
+  markerArrow: {
+    width: 0,
+    height: 0,
+    borderLeft: '8px solid transparent',
+    borderRight: '8px solid transparent',
+    borderTop: '8px solid',
+    marginTop: -2,
+  },
+  previewCard: {
+    position: 'absolute',
+    top: 16,
+    left: 16,
+    right: 16,
+    maxWidth: 420,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+    overflow: 'hidden',
+  },
+  previewContent: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+  },
+  previewEmoji: {
+    fontSize: 32,
+    marginRight: 12,
+  },
+  previewText: {
+    flex: 1,
+    minWidth: 0,
+  },
+  previewTitle: {
+    fontSize: 17,
+    fontWeight: 700,
+    color: '#1a1a1a',
+    marginBottom: 2,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  previewLocation: {
+    fontSize: 14,
+    color: '#666',
+    marginBottom: 2,
+    whiteSpace: 'nowrap',
+    overflow: 'hidden',
+    textOverflow: 'ellipsis',
+  },
+  previewTime: {
+    fontSize: 13,
+    color: '#999',
+  },
+  previewDescription: {
+    padding: '0 16px 16px',
+    fontSize: 14,
+    lineHeight: '20px',
+    color: '#444',
+  },
+  timelinePill: {
+    position: 'absolute',
+    bottom: 32,
+    left: 16,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    borderRadius: 20,
+    padding: '10px 14px',
+    gap: 8,
+    cursor: 'pointer',
+    userSelect: 'none',
+  },
+  timelinePillDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#fff',
+  },
+  timelinePillText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: 600,
+  },
+  timelineContainer: {
+    position: 'absolute',
+    bottom: 32,
+    left: 16,
+    right: 16,
+    maxWidth: 600,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    borderRadius: 16,
+    padding: '10px 12px 8px',
+    userSelect: 'none',
+  },
+  timelineHeader: {
+    display: 'flex',
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  timelineLabel: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 700,
+    flex: 1,
+    textAlign: 'center',
+  },
+  timelineClose: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    fontSize: 16,
+    paddingLeft: 8,
+    cursor: 'pointer',
+  },
+  timelineTrack: {
+    position: 'relative',
+    height: 36,
+    cursor: 'pointer',
+  },
+  dotWrapper: {
+    position: 'absolute',
+    top: 0,
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    transform: 'translateX(-50%)',
+  },
+  dot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+  },
+  dotActive: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#fff',
+    marginTop: -2,
+  },
+  tickLabel: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 9,
+    marginTop: 4,
+  },
+};
