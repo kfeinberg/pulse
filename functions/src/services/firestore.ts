@@ -58,6 +58,9 @@ export async function writeScrapedEvents(
   const db = getFirestore();
   let addedCount = 0;
   let skippedDup = 0;
+  let skippedTitleTime = 0;
+  let skippedTitleLoc = 0;
+  let skippedLocTime = 0;
 
   const validEvents = events.filter((event) => {
     if (!event.title) {
@@ -86,6 +89,7 @@ export async function writeScrapedEvents(
 
     if (!titleTimeQuery.empty) {
       skippedDup++;
+      skippedTitleTime++;
       console.log(`Skipped dup (title+time): "${event.title}" at ${startDate.toISOString()}`);
       continue;
     }
@@ -101,6 +105,7 @@ export async function writeScrapedEvents(
 
       if (!titleLocQuery.empty) {
         skippedDup++;
+        skippedTitleLoc++;
         console.log(`Skipped dup (title+location): "${event.title}" at "${event.location}"`);
         continue;
       }
@@ -117,6 +122,7 @@ export async function writeScrapedEvents(
 
       if (!locTimeQuery.empty) {
         skippedDup++;
+        skippedLocTime++;
         console.log(`Skipped dup (location+time): "${event.location}" at ${startDate.toISOString()}`);
         continue;
       }
@@ -145,7 +151,7 @@ export async function writeScrapedEvents(
   }
 
   console.log(
-    `Done: ${addedCount} added, ${skippedDup} duplicates skipped`
+    `Done: ${addedCount} added, ${skippedDup} duplicates skipped (title+time: ${skippedTitleTime}, title+location: ${skippedTitleLoc}, location+time: ${skippedLocTime})`
   );
   return addedCount;
 }

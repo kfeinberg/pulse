@@ -4,13 +4,17 @@ import { parseEventsFromText } from "../../services/parser.js";
 const BROWSE_BASE =
   "https://dice.fm/browse/new_york-5bbf4db0f06331478e9b2c59";
 
-function getTodayEST(): string {
-  return new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+function getDateEST(daysFromNow: number): string {
+  const d = new Date();
+  d.setDate(d.getDate() + daysFromNow);
+  return d.toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
-function getBrowseUrl(): string {
-  const today = getTodayEST();
-  return `${BROWSE_BASE}?from=${today}&until=${today}`;
+function getBrowseUrls(): string[] {
+  return [0, 1, 2].map((offset) => {
+    const date = getDateEST(offset);
+    return `${BROWSE_BASE}?from=${date}&until=${date}`;
+  });
 }
 const FETCH_HEADERS = {
   "User-Agent":
@@ -95,23 +99,29 @@ export function createDiceScraper(apiKey: string): EventSource {
   return {
     name: "dice",
     async scrape(): Promise<ScrapedEvent[]> {
-      // Step 1: Fetch browse page and extract event URLs
-      const browseUrl = getBrowseUrl();
-      console.log(`Fetching Dice browse page: ${browseUrl}`);
-      const browseRes = await fetch(browseUrl, { headers: FETCH_HEADERS });
-      if (!browseRes.ok) {
-        console.error(
-          `Failed to fetch Dice browse page: ${browseRes.status}`
-        );
-        return [];
-      }
-      const browseHtml = await browseRes.text();
-      console.log(`Dice browse page: ${browseHtml.length} chars`);
+      // Step 1: Fetch browse pages for today + next 2 days and extract event URLs
+      const browseUrls = getBrowseUrls();
+      const eventUrls: string[] = [];
 
-      const eventUrls = extractEventUrls(browseHtml);
-      console.log(`Found ${eventUrls.length} event URLs`);
+      for (const browseUrl of browseUrls) {
+        console.log(`Fetching Dice browse page: ${browseUrl}`);
+        const browseRes = await fetch(browseUrl, { headers: FETCH_HEADERS });
+        if (!browseRes.ok) {
+          console.error(`Failed to fetch Dice browse page: ${browseRes.status}`);
+          continue;
+        }
+        const browseHtml = await browseRes.text();
+        console.log(`Dice browse page: ${browseHtml.length} chars`);
+
+        const urls = extractEventUrls(browseHtml);
+        for (const url of urls) {
+          if (!eventUrls.includes(url)) eventUrls.push(url);
+        }
+        console.log(`Found ${urls.length} event URLs (${eventUrls.length} unique total)`);
+      }
+
       if (eventUrls.length === 0) {
-        console.error(`No event URLs found in ${browseHtml.length} chars of HTML`);
+        console.error("No event URLs found across all browse pages");
         return [];
       }
       console.log(`First 3 URLs: ${eventUrls.slice(0, 3).join(", ")}`);
@@ -163,7 +173,7 @@ export function createDiceScraper(apiKey: string): EventSource {
       const parsedEvents = await parseEventsFromText(
         fullText,
         "dice",
-        browseUrl,
+        BROWSE_BASE,
         apiKey
       );
       console.log(`Claude returned ${parsedEvents.length} categorized events`);
