@@ -1,6 +1,7 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
-import { subscribeToUpcomingEvents } from './firebase';
+import { subscribeToUpcomingEvents, voteOnEvent } from './firebase';
+import { getAllVotes, setVote, VoteType } from './votes';
 import { CATEGORIES } from './categories';
 import { MAP_STYLE } from './mapStyle';
 import { AppEvent } from './types';
@@ -27,7 +28,44 @@ export function App() {
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
+  const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const trackRef = useRef<HTMLDivElement>(null);
+
+  // Load votes from localStorage
+  useEffect(() => {
+    setVotes(getAllVotes());
+  }, []);
+
+  const handleVote = useCallback((event: AppEvent, voteType: 'up' | 'down') => {
+    const previousVote = votes[event.id] ?? null;
+    const newVote: VoteType = previousVote === voteType ? null : voteType;
+
+    // Optimistic local update
+    setEvents((prev) => prev.map((e) => {
+      if (e.id !== event.id) return e;
+      const updated = { ...e };
+      if (previousVote === voteType) {
+        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
+        else updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
+      } else {
+        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) + 1;
+        else updated.thumbsDown = (updated.thumbsDown ?? 0) + 1;
+        if (previousVote === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
+        if (previousVote === 'down') updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
+      }
+      return updated;
+    }));
+
+    setVotes((prev) => ({ ...prev, [event.id]: newVote }));
+    setVote(event.id, newVote);
+
+    setSelectedEvent((prev) => {
+      if (!prev || prev.id !== event.id) return prev;
+      return events.find((e) => e.id === event.id) ?? prev;
+    });
+
+    voteOnEvent(event.id, voteType, previousVote).catch(console.warn);
+  }, [votes, events]);
 
   // Timeline snaps — every 2 hours for 72 hours
   const timelineSnaps = useMemo(() => {
@@ -165,6 +203,36 @@ export function App() {
           </div>
           {selectedEvent.description && (
             <div style={styles.previewDescription}>{selectedEvent.description}</div>
+          )}
+          {timelineIndex === 0 && (
+            <div style={styles.voteRow}>
+              <button
+                style={{
+                  ...styles.voteButton,
+                  ...(votes[selectedEvent.id] === 'up' ? styles.voteButtonUp : {}),
+                }}
+                onClick={(e) => { e.stopPropagation(); handleVote(selectedEvent, 'up'); }}
+              >
+                <span>👍</span>
+                <span style={{
+                  ...styles.voteCount,
+                  ...(votes[selectedEvent.id] === 'up' ? styles.voteCountActive : {}),
+                }}>{selectedEvent.thumbsUp ?? 0}</span>
+              </button>
+              <button
+                style={{
+                  ...styles.voteButton,
+                  ...(votes[selectedEvent.id] === 'down' ? styles.voteButtonDown : {}),
+                }}
+                onClick={(e) => { e.stopPropagation(); handleVote(selectedEvent, 'down'); }}
+              >
+                <span>👎</span>
+                <span style={{
+                  ...styles.voteCount,
+                  ...(votes[selectedEvent.id] === 'down' ? styles.voteCountActive : {}),
+                }}>{selectedEvent.thumbsDown ?? 0}</span>
+              </button>
+            </div>
           )}
         </div>
       )}
@@ -315,6 +383,38 @@ const styles: Record<string, React.CSSProperties> = {
   previewTime: {
     fontSize: 13,
     color: '#999',
+  },
+  voteRow: {
+    display: 'flex',
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    padding: '0 12px 12px',
+  },
+  voteButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    border: 'none',
+    borderRadius: 20,
+    padding: '6px 12px',
+    backgroundColor: '#f0f0f0',
+    cursor: 'pointer',
+    fontSize: 14,
+  },
+  voteButtonUp: {
+    backgroundColor: '#2a7cff',
+  },
+  voteButtonDown: {
+    backgroundColor: '#ff4444',
+  },
+  voteCount: {
+    fontSize: 12,
+    fontWeight: 600,
+    color: '#666',
+  },
+  voteCountActive: {
+    color: '#fff',
   },
   previewDescription: {
     padding: '0 16px 16px',

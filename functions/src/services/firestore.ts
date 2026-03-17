@@ -77,17 +77,49 @@ export async function writeScrapedEvents(
     const endDate = new Date(event.endTimestamp);
 
     // Dedup: check for same title + same start time
-    const titleQuery = await db
+    const titleTimeQuery = await db
       .collection(EVENTS_COLLECTION)
       .where("title", "==", event.title)
       .where("startTime", "==", Timestamp.fromDate(startDate))
       .limit(1)
       .get();
 
-    if (!titleQuery.empty) {
+    if (!titleTimeQuery.empty) {
       skippedDup++;
-      console.log(`Skipped dup: "${event.title}" at ${startDate.toISOString()}`);
+      console.log(`Skipped dup (title+time): "${event.title}" at ${startDate.toISOString()}`);
       continue;
+    }
+
+    // Dedup: check for same title + same location
+    if (event.location) {
+      const titleLocQuery = await db
+        .collection(EVENTS_COLLECTION)
+        .where("title", "==", event.title)
+        .where("location", "==", event.location)
+        .limit(1)
+        .get();
+
+      if (!titleLocQuery.empty) {
+        skippedDup++;
+        console.log(`Skipped dup (title+location): "${event.title}" at "${event.location}"`);
+        continue;
+      }
+    }
+
+    // Dedup: check for same location + same start time
+    if (event.location) {
+      const locTimeQuery = await db
+        .collection(EVENTS_COLLECTION)
+        .where("location", "==", event.location)
+        .where("startTime", "==", Timestamp.fromDate(startDate))
+        .limit(1)
+        .get();
+
+      if (!locTimeQuery.empty) {
+        skippedDup++;
+        console.log(`Skipped dup (location+time): "${event.location}" at ${startDate.toISOString()}`);
+        continue;
+      }
     }
 
     // Use coordinates from scraper if available, otherwise geocode

@@ -2,10 +2,13 @@ import { initializeApp } from 'firebase/app';
 import {
   Timestamp,
   collection,
+  doc,
   getFirestore,
+  increment,
   onSnapshot,
   orderBy,
   query,
+  updateDoc,
   where,
 } from 'firebase/firestore';
 import { AppEvent } from './types';
@@ -42,4 +45,24 @@ export function subscribeToUpcomingEvents(
   });
 
   return unsubscribe;
+}
+
+export async function voteOnEvent(
+  eventId: string,
+  voteType: 'up' | 'down',
+  previousVote: 'up' | 'down' | null
+): Promise<void> {
+  const ref = doc(db, 'events', eventId);
+  const updates: Record<string, any> = {};
+
+  if (previousVote === voteType) {
+    updates[voteType === 'up' ? 'thumbsUp' : 'thumbsDown'] = increment(-1);
+  } else {
+    updates[voteType === 'up' ? 'thumbsUp' : 'thumbsDown'] = increment(1);
+    if (previousVote) {
+      updates[previousVote === 'up' ? 'thumbsUp' : 'thumbsDown'] = increment(-1);
+    }
+  }
+
+  await updateDoc(ref, updates);
 }

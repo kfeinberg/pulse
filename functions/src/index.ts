@@ -71,6 +71,42 @@ export const scrapeNow = onRequest(
   }
 );
 
+// Scheduled: runs daily at 3am ET, deletes events that have ended
+export const dailyCleanup = onSchedule(
+  {
+    schedule: "0 3 * * *",
+    timeZone: "America/New_York",
+    timeoutSeconds: 120,
+  },
+  async () => {
+    const db = getFirestore();
+    const now = new Date();
+    const snapshot = await db
+      .collection("events")
+      .where("endTime", "<", now)
+      .get();
+
+    if (snapshot.empty) {
+      console.log("No expired events to clean up");
+      return;
+    }
+
+    const batchSize = 500;
+    let deleted = 0;
+    for (let i = 0; i < snapshot.docs.length; i += batchSize) {
+      const batch = db.batch();
+      const chunk = snapshot.docs.slice(i, i + batchSize);
+      for (const doc of chunk) {
+        batch.delete(doc.ref);
+      }
+      await batch.commit();
+      deleted += chunk.length;
+    }
+
+    console.log(`Cleaned up ${deleted} expired events`);
+  }
+);
+
 // Delete all events — for testing only
 export const deleteAllEvents = onRequest(async (_req, res) => {
   const db = getFirestore();

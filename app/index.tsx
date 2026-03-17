@@ -275,28 +275,30 @@ export default function MapScreen() {
               </View>
             </View>
           </TouchableOpacity>
-          <View style={styles.floatingVotes}>
-            <TouchableOpacity
-              style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'up' && styles.floatingVoteActive]}
-              onPress={() => handleVote(selectedEvent, 'up')}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.floatingVoteEmoji}>👍</Text>
-              <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'up' && styles.floatingVoteCountActive]}>
-                {selectedEvent.thumbsUp ?? 0}
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'down' && styles.floatingVoteDown]}
-              onPress={() => handleVote(selectedEvent, 'down')}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.floatingVoteEmoji}>👎</Text>
-              <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'down' && styles.floatingVoteCountActive]}>
-                {selectedEvent.thumbsDown ?? 0}
-              </Text>
-            </TouchableOpacity>
-          </View>
+          {timelineIndex === 0 && (
+            <View style={styles.floatingVotes}>
+              <TouchableOpacity
+                style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'up' && styles.floatingVoteActive]}
+                onPress={() => handleVote(selectedEvent, 'up')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.floatingVoteEmoji}>👍</Text>
+                <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'up' && styles.floatingVoteCountActive]}>
+                  {selectedEvent.thumbsUp ?? 0}
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'down' && styles.floatingVoteDown]}
+                onPress={() => handleVote(selectedEvent, 'down')}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.floatingVoteEmoji}>👎</Text>
+                <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'down' && styles.floatingVoteCountActive]}>
+                  {selectedEvent.thumbsDown ?? 0}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       )}
 
