@@ -9,10 +9,9 @@ import { writeScrapedEvents } from "./services/firestore.js";
 initializeApp();
 
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
-const scrapingBeeApiKey = defineSecret("SCRAPINGBEE_API_KEY");
 
-async function runScraper(apiKey: string, scrapingBeeKey?: string): Promise<string[]> {
-  const sources = getAllSources(apiKey, scrapingBeeKey);
+async function runScraper(apiKey: string): Promise<string[]> {
+  const sources = getAllSources(apiKey);
   const results: string[] = [];
 
   for (const source of sources) {
@@ -40,28 +39,27 @@ export const dailyScrape = onSchedule(
   {
     schedule: "0 8 * * *",
     timeZone: "America/New_York",
-    timeoutSeconds: 540,
-    secrets: [anthropicApiKey, scrapingBeeApiKey],
+    timeoutSeconds: 1800,
+    memory: "2GiB",
+    secrets: [anthropicApiKey],
   },
   async () => {
-    const results = await runScraper(anthropicApiKey.value(), scrapingBeeApiKey.value());
+    const results = await runScraper(anthropicApiKey.value());
     console.log("Daily scrape complete:", results);
   }
 );
 
 // HTTP trigger for manual testing — includes full pipeline debug
 export const scrapeNow = onRequest(
-  { secrets: [anthropicApiKey, scrapingBeeApiKey], timeoutSeconds: 540 },
+  { secrets: [anthropicApiKey], timeoutSeconds: 1800, memory: "2GiB" },
   async (_req, res) => {
     const debug: Record<string, unknown> = {};
     const apiKey = anthropicApiKey.value();
     debug.apiKeyPresent = !!apiKey;
-    debug.apiKeyLength = apiKey?.length ?? 0;
-    debug.apiKeyPrefix = apiKey?.slice(0, 7) ?? "";
 
     // Run full pipeline
     try {
-      const results = await runScraper(apiKey, scrapingBeeApiKey.value());
+      const results = await runScraper(apiKey);
       debug.results = results;
     } catch (err) {
       debug.scraperError = String(err);
@@ -106,24 +104,3 @@ export const dailyCleanup = onSchedule(
     console.log(`Cleaned up ${deleted} expired events`);
   }
 );
-
-// Delete all events — for testing only
-export const deleteAllEvents = onRequest(async (_req, res) => {
-  const db = getFirestore();
-  const snapshot = await db.collection("events").get();
-
-  const batchSize = 500;
-  let deleted = 0;
-
-  for (let i = 0; i < snapshot.docs.length; i += batchSize) {
-    const batch = db.batch();
-    const chunk = snapshot.docs.slice(i, i + batchSize);
-    for (const doc of chunk) {
-      batch.delete(doc.ref);
-    }
-    await batch.commit();
-    deleted += chunk.length;
-  }
-
-  res.json({ success: true, deleted });
-});

@@ -3,7 +3,9 @@ service cloud.firestore {
   match /databases/{database}/documents {
     match /events/{eventId} {
       allow read: if true;
-      allow write: if true;
+      allow update: if request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['thumbsUp', 'thumbsDown']);
+      allow create, delete: if false;
     }
   }
 }

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated } from 'react-native';
 import MapView, { Marker, Callout, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent } from '@/types';
@@ -15,11 +15,40 @@ export default function MapScreen() {
   const [showPasscodeModal, setShowPasscodeModal] = useState(false);
   const [isAdmin, setIsAdmin] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
+  const [dataLoaded, setDataLoaded] = useState(false);
+  const [splashVisible, setSplashVisible] = useState(true);
+  const splashOpacity = useRef(new Animated.Value(1)).current;
+  const dotScale = useRef(new Animated.Value(1)).current;
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
+
+  // Pulsing dot animation
+  useEffect(() => {
+    const loop = Animated.loop(
+      Animated.sequence([
+        Animated.timing(dotScale, { toValue: 0.75, duration: 1000, useNativeDriver: true }),
+        Animated.timing(dotScale, { toValue: 1, duration: 1000, useNativeDriver: true }),
+      ])
+    );
+    loop.start();
+    return () => loop.stop();
+  }, [dotScale]);
+
+  // Fade out splash once data arrives
+  useEffect(() => {
+    if (!dataLoaded) return;
+    const timer = setTimeout(() => {
+      Animated.timing(splashOpacity, {
+        toValue: 0,
+        duration: 400,
+        useNativeDriver: true,
+      }).start(() => setSplashVisible(false));
+    }, 600);
+    return () => clearTimeout(timer);
+  }, [dataLoaded, splashOpacity]);
 
   const timelineSnaps = useMemo(() => {
     const snaps: { label: string; time: Date }[] = [];
@@ -127,6 +156,7 @@ export default function MapScreen() {
     try {
       unsubscribe = subscribeToUpcomingEvents((upcoming) => {
         setAllEvents(upcoming);
+        setDataLoaded(true);
       });
     } catch (e) {
       console.warn('Firebase not configured yet:', e);
@@ -370,6 +400,14 @@ export default function MapScreen() {
         onClose={() => setShowPasscodeModal(false)}
         onSubmit={handlePasscodeSubmit}
       />
+
+      {splashVisible && (
+        <Animated.View style={[styles.splash, { opacity: splashOpacity }]} pointerEvents="none">
+          <Animated.View style={[styles.splashDot, { transform: [{ scale: dotScale }] }]} />
+          <Text style={styles.splashTitle}>Pulse</Text>
+          <Text style={styles.splashSubtitle}>NYC Events</Text>
+        </Animated.View>
+      )}
     </View>
   );
 }
@@ -589,5 +627,30 @@ const styles = StyleSheet.create({
   adminButtonText: {
     color: '#fff',
     fontSize: 22,
+  },
+  splash: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#1a1a1a',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  splashDot: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#ff5252',
+    marginBottom: 16,
+  },
+  splashTitle: {
+    color: '#fff',
+    fontSize: 36,
+    fontWeight: '700',
+    letterSpacing: 1,
+  },
+  splashSubtitle: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 16,
+    marginTop: 6,
+    fontWeight: '500',
   },
 });

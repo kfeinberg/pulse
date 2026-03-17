@@ -4,9 +4,10 @@ import { subscribeToUpcomingEvents, voteOnEvent } from './firebase';
 import { getAllVotes, setVote, VoteType } from './votes';
 import { CATEGORIES } from './categories';
 import { MAP_STYLE } from './mapStyle';
-import { AppEvent } from './types';
+import { AppEvent, EventCategory } from './types';
 
 const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
+const WELCOME_KEY = 'pulse_welcomed';
 
 function formatTime(millis: number) {
   const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
@@ -29,6 +30,7 @@ export function App() {
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
+  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem(WELCOME_KEY));
   const trackRef = useRef<HTMLDivElement>(null);
 
   // Load votes from localStorage
@@ -183,6 +185,12 @@ export function App() {
         })}
       </GoogleMap>
 
+      {/* Logo */}
+      <div style={styles.logo}>
+        <div style={styles.logoDot} />
+        <span style={styles.logoText}>Pulse</span>
+      </div>
+
       {/* Event preview card */}
       {selectedEvent && (
         <div style={styles.previewCard}>
@@ -285,6 +293,43 @@ export function App() {
                 </div>
               );
             })}
+          </div>
+        </div>
+      )}
+
+      {/* Welcome modal */}
+      {showWelcome && (
+        <div style={styles.welcomeBackdrop}>
+          <div style={styles.welcomeModal}>
+            <div style={styles.welcomeHeader}>
+              <div style={styles.welcomeDot} />
+              <span style={styles.welcomeTitle}>Pulse</span>
+            </div>
+            <p style={styles.welcomeSubtitle}>
+              What's happening in NYC right now
+            </p>
+            <div style={styles.welcomeCategories}>
+              {(Object.keys(CATEGORIES) as EventCategory[]).map((key) => {
+                const cat = CATEGORIES[key];
+                return (
+                  <div key={key} style={styles.welcomeRow}>
+                    <div style={{ ...styles.welcomeSwatch, backgroundColor: cat.color }}>
+                      <span style={styles.welcomeSwatchEmoji}>{cat.emoji}</span>
+                    </div>
+                    <span style={styles.welcomeLabel}>{cat.label}</span>
+                  </div>
+                );
+              })}
+            </div>
+            <button
+              style={styles.welcomeButton}
+              onClick={() => {
+                localStorage.setItem(WELCOME_KEY, '1');
+                setShowWelcome(false);
+              }}
+            >
+              Explore
+            </button>
           </div>
         </div>
       )}
@@ -504,9 +549,119 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: '#fff',
     marginTop: -2,
   },
+  logo: {
+    position: 'absolute',
+    top: 16,
+    right: 16,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(30, 30, 30, 0.75)',
+    borderRadius: 20,
+    padding: '8px 14px 8px 10px',
+    pointerEvents: 'none' as any,
+  },
+  logoDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#ff5252',
+    animation: 'pulse-dot 2s ease-in-out infinite',
+  },
+  logoText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+  },
   tickLabel: {
     color: 'rgba(255, 255, 255, 0.5)',
     fontSize: 9,
     marginTop: 4,
+  },
+  welcomeBackdrop: {
+    position: 'absolute',
+    inset: 0,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1000,
+  },
+  welcomeModal: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 20,
+    padding: '32px 36px',
+    maxWidth: 320,
+    width: '90%',
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+  },
+  welcomeHeader: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  welcomeDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#ff5252',
+    animation: 'pulse-dot 2s ease-in-out infinite',
+  },
+  welcomeTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: 700,
+    letterSpacing: 0.5,
+  },
+  welcomeSubtitle: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 14,
+    marginBottom: 24,
+  },
+  welcomeCategories: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 12,
+    width: '100%',
+    marginBottom: 28,
+  },
+  welcomeRow: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  welcomeSwatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  welcomeSwatchEmoji: {
+    fontSize: 16,
+  },
+  welcomeLabel: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: 500,
+  },
+  welcomeButton: {
+    backgroundColor: '#fff',
+    color: '#1a1a1a',
+    border: 'none',
+    borderRadius: 12,
+    padding: '12px 36px',
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: 'pointer',
+    letterSpacing: 0.3,
   },
 };
