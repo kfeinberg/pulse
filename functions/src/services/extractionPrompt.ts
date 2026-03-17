@@ -57,9 +57,11 @@ If an event is truly a single continuous event spanning multiple days (e.g. a 3-
 
 Only include events that have a clear date. Skip any event where the date and time cannot be determined.
 
-OTHER:
+EVENTS TO SKIP:
 
-If you cannot determine the location of an event, do not include it.
+- Do NOT include theater events (plays, musicals, Broadway shows, off-Broadway, theatrical performances). Skip these entirely.
+- Do NOT include permanent attractions, permanent museum exhibits, or ongoing installations that have no end date. Only include temporary/limited-time events. Use your best judgment: if the title or description suggests it's a permanent fixture (e.g. "visit the Museum of Natural History", "the Statue of Liberty"), skip it. Temporary exhibitions with specific date ranges ARE fine to include.
+- If you cannot determine the location of an event, do not include it.
 
 MULTI-LOCATION EVENTS:
 
