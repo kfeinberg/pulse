@@ -108,11 +108,18 @@ export function createNycForFreeScraper(apiKey: string): EventSource {
         const startDate = new Date(item.startDate);
         const endDate = item.endDate ? new Date(item.endDate) : null;
 
+        const formatET = (d: Date) =>
+          d.toLocaleString("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", hour12: false,
+          });
+
         eventTexts.push(
           `Event: ${item.title}\n` +
           `Description: ${description}\n` +
-          `Start: ${startDate.toISOString()}\n` +
-          `End: ${endDate ? endDate.toISOString() : "unknown"}\n` +
+          `Start (Eastern Time): ${formatET(startDate)}\n` +
+          `End (Eastern Time): ${endDate ? formatET(endDate) : "unknown"}\n` +
           `Location: ${locationParts.join(", ")}`
         );
       }

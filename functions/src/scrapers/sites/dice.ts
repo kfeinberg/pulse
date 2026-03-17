@@ -154,12 +154,19 @@ export function createDiceScraper(apiKey: string): EventSource {
         const start = new Date(event.startDate!);
         const end = event.endDate ? new Date(event.endDate) : null;
 
+        const formatET = (d: Date) =>
+          d.toLocaleString("en-US", {
+            timeZone: "America/New_York",
+            year: "numeric", month: "2-digit", day: "2-digit",
+            hour: "2-digit", minute: "2-digit", hour12: false,
+          });
+
         return (
           `Event: ${event.name}\n` +
           `Description: ${event.description || "N/A"}\n` +
           `Type: ${event["@type"] || "Event"}\n` +
-          `Start: ${start.toISOString()}\n` +
-          `End: ${end ? end.toISOString() : "unknown"}\n` +
+          `Start (Eastern Time): ${formatET(start)}\n` +
+          `End (Eastern Time): ${end ? formatET(end) : "unknown"}\n` +
           `Location: ${locationParts.join(", ")}\n` +
           `URL: ${url}`
         );
