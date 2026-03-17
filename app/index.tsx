@@ -5,7 +5,11 @@ import { useRouter } from 'expo-router';
 import { AppEvent } from '@/types';
 import { subscribeToUpcomingEvents, voteOnEvent } from '@/services/firebase';
 import { getAllVotes, setVote, VoteType } from '@/services/votes';
-import { CATEGORIES, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
+import { EventCategory } from '@/types';
+
+const WELCOME_KEY = 'pulse_welcomed';
 import { MAP_STYLE } from '@/constants/mapStyle';
 import { AdminPasscodeModal } from '@/components/AdminPasscodeModal';
 
@@ -16,7 +20,8 @@ export default function MapScreen() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [splashVisible, setSplashVisible] = useState(true);
+  const [showWelcome, setShowWelcome] = useState(true);
+  const [welcomeChecked, setWelcomeChecked] = useState(false);
   const splashOpacity = useRef(new Animated.Value(1)).current;
   const dotScale = useRef(new Animated.Value(1)).current;
   const router = useRouter();
@@ -24,6 +29,14 @@ export default function MapScreen() {
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
+
+  // Check if user has seen welcome before
+  useEffect(() => {
+    AsyncStorage.getItem(WELCOME_KEY).then((val) => {
+      if (val) setShowWelcome(false);
+      setWelcomeChecked(true);
+    });
+  }, []);
 
   // Pulsing dot animation
   useEffect(() => {
@@ -37,18 +50,33 @@ export default function MapScreen() {
     return () => loop.stop();
   }, [dotScale]);
 
-  // Fade out splash once data arrives
+  // Fade out splash once data arrives and welcome is not needed
   useEffect(() => {
-    if (!dataLoaded) return;
-    const timer = setTimeout(() => {
+    if (!dataLoaded || !welcomeChecked) return;
+    if (showWelcome) {
+      // Fade splash to reveal welcome modal behind it
       Animated.timing(splashOpacity, {
         toValue: 0,
         duration: 400,
         useNativeDriver: true,
-      }).start(() => setSplashVisible(false));
-    }, 600);
-    return () => clearTimeout(timer);
-  }, [dataLoaded, splashOpacity]);
+      }).start();
+    } else {
+      // Returning user — fade splash then remove
+      const timer = setTimeout(() => {
+        Animated.timing(splashOpacity, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: true,
+        }).start();
+      }, 600);
+      return () => clearTimeout(timer);
+    }
+  }, [dataLoaded, welcomeChecked, showWelcome, splashOpacity]);
+
+  const handleDismissWelcome = useCallback(() => {
+    AsyncStorage.setItem(WELCOME_KEY, '1');
+    setShowWelcome(false);
+  }, []);
 
   const timelineSnaps = useMemo(() => {
     const snaps: { label: string; time: Date }[] = [];
@@ -401,13 +429,41 @@ export default function MapScreen() {
         onSubmit={handlePasscodeSubmit}
       />
 
-      {splashVisible && (
-        <Animated.View style={[styles.splash, { opacity: splashOpacity }]} pointerEvents="none">
-          <Animated.View style={[styles.splashDot, { transform: [{ scale: dotScale }] }]} />
-          <Text style={styles.splashTitle}>Pulse</Text>
-          <Text style={styles.splashSubtitle}>NYC Events</Text>
-        </Animated.View>
+      {/* Welcome modal */}
+      {showWelcome && (
+        <View style={styles.welcomeBackdrop}>
+          <View style={styles.welcomeModal}>
+            <View style={styles.welcomeHeader}>
+              <Animated.View style={[styles.welcomeHeaderDot, { transform: [{ scale: dotScale }] }]} />
+              <Text style={styles.welcomeTitle}>Pulse</Text>
+            </View>
+            <Text style={styles.welcomeSubtitle}>What's happening in NYC right now</Text>
+            <View style={styles.welcomeCategories}>
+              {CATEGORY_LIST.map((key) => {
+                const cat = CATEGORIES[key];
+                return (
+                  <View key={key} style={styles.welcomeRow}>
+                    <View style={[styles.welcomeSwatch, { backgroundColor: cat.color }]}>
+                      <Text style={styles.welcomeSwatchEmoji}>{cat.emoji}</Text>
+                    </View>
+                    <Text style={styles.welcomeLabel}>{cat.label}</Text>
+                  </View>
+                );
+              })}
+            </View>
+            <TouchableOpacity style={styles.welcomeButton} onPress={handleDismissWelcome} activeOpacity={0.8}>
+              <Text style={styles.welcomeButtonText}>Explore</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       )}
+
+      {/* Splash screen (covers everything until data loads) */}
+      <Animated.View style={[styles.splash, { opacity: splashOpacity }]} pointerEvents="none">
+        <Animated.View style={[styles.splashDot, { transform: [{ scale: dotScale }] }]} />
+        <Text style={styles.splashTitle}>Pulse</Text>
+        <Text style={styles.splashSubtitle}>NYC Events</Text>
+      </Animated.View>
     </View>
   );
 }
@@ -628,11 +684,88 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 22,
   },
+  welcomeBackdrop: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  welcomeModal: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 20,
+    paddingVertical: 32,
+    paddingHorizontal: 36,
+    width: '85%',
+    maxWidth: 320,
+    alignItems: 'center',
+  },
+  welcomeHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 6,
+  },
+  welcomeHeaderDot: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#ff5252',
+  },
+  welcomeTitle: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '700',
+    letterSpacing: 0.5,
+  },
+  welcomeSubtitle: {
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontSize: 14,
+    marginBottom: 24,
+  },
+  welcomeCategories: {
+    width: '100%',
+    gap: 12,
+    marginBottom: 28,
+  },
+  welcomeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  welcomeSwatch: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  welcomeSwatchEmoji: {
+    fontSize: 16,
+  },
+  welcomeLabel: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '500',
+  },
+  welcomeButton: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 36,
+  },
+  welcomeButtonText: {
+    color: '#1a1a1a',
+    fontSize: 16,
+    fontWeight: '700',
+    letterSpacing: 0.3,
+  },
   splash: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: '#1a1a1a',
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 20,
   },
   splashDot: {
     width: 20,
