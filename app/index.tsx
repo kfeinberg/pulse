@@ -1,17 +1,28 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated } from 'react-native';
-import MapView, { Marker, Callout, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking } from 'react-native';
+import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent } from '@/types';
-import { subscribeToUpcomingEvents, voteOnEvent } from '@/services/firebase';
-import { getAllVotes, setVote, VoteType } from '@/services/votes';
+import { subscribeToUpcomingEvents, voteOnEvent, markInterested } from '@/services/firebase';
+import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
 import { EventCategory } from '@/types';
 
 const WELCOME_KEY = 'pulse_welcomed';
+
 import { MAP_STYLE } from '@/constants/mapStyle';
 import { AdminPasscodeModal } from '@/components/AdminPasscodeModal';
+
+function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 3958.8;
+  const dLat = (lat2 - lat1) * Math.PI / 180;
+  const dLon = (lon2 - lon1) * Math.PI / 180;
+  const a = Math.sin(dLat / 2) ** 2 +
+    Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+    Math.sin(dLon / 2) ** 2;
+  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
 
 export default function MapScreen() {
   const [events, setEvents] = useState<AppEvent[]>([]);
@@ -26,9 +37,18 @@ export default function MapScreen() {
   const dotScale = useRef(new Animated.Value(1)).current;
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
+  const [showListView, setShowListView] = useState(false);
   const [timelineIndex, setTimelineIndex] = useState(0);
+  const [timelineVisualIndex, setTimelineVisualIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [trackWidth, setTrackWidth] = useState(0);
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const filterAnim = useRef(new Animated.Value(0)).current;
+  const [activeCategories, setActiveCategories] = useState<Set<EventCategory>>(
+    new Set(CATEGORY_LIST)
+  );
+  const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
 
   // Check if user has seen welcome before
   useEffect(() => {
@@ -73,6 +93,32 @@ export default function MapScreen() {
     }
   }, [dataLoaded, welcomeChecked, showWelcome, splashOpacity]);
 
+  useEffect(() => {
+    if (filtersOpen) {
+      filterAnim.setValue(0);
+      Animated.timing(filterAnim, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }).start();
+    } else {
+      filterAnim.stopAnimation();
+      filterAnim.setValue(0);
+    }
+  }, [filtersOpen, filterAnim]);
+
+  const toggleCategory = useCallback((cat: EventCategory) => {
+    setActiveCategories((prev) => {
+      const next = new Set(prev);
+      if (next.has(cat)) {
+        if (next.size > 1) next.delete(cat);
+      } else {
+        next.add(cat);
+      }
+      return next;
+    });
+  }, []);
+
   const handleDismissWelcome = useCallback(() => {
     AsyncStorage.setItem(WELCOME_KEY, '1');
     setShowWelcome(false);
@@ -108,18 +154,26 @@ export default function MapScreen() {
   const timelineTrackRef = useRef<View>(null);
   const timelineTrackX = useRef(0);
 
-  const updateTimelineFromTouch = useCallback((pageX: number) => {
+  const timelineMoveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateTimelineFromTouch = useCallback((pageX: number, immediate = false) => {
     if (!trackWidth) return;
     const x = pageX - timelineTrackX.current;
     const fraction = Math.max(0, Math.min(1, x / trackWidth));
     const index = Math.round(fraction * (timelineSnaps.length - 1));
-    setTimelineIndex(index);
+    setTimelineVisualIndex(index);
+    if (immediate) {
+      setTimelineIndex(index);
+    } else {
+      if (timelineMoveTimer.current) clearTimeout(timelineMoveTimer.current);
+      timelineMoveTimer.current = setTimeout(() => setTimelineIndex(index), 100);
+    }
   }, [trackWidth, timelineSnaps.length]);
 
   const handleTimelineGrant = useCallback((evt: GestureResponderEvent) => {
     timelineTrackRef.current?.measureInWindow((x) => {
       timelineTrackX.current = x;
-      updateTimelineFromTouch(evt.nativeEvent.pageX);
+      updateTimelineFromTouch(evt.nativeEvent.pageX, true);
     });
   }, [updateTimelineFromTouch]);
 
@@ -133,6 +187,7 @@ export default function MapScreen() {
 
   useEffect(() => {
     getAllVotes().then(setVotes).catch(() => {});
+    getInterestedEvents().then(setInterestedMap).catch(() => {});
   }, []);
 
   const handleVote = useCallback(async (event: AppEvent, voteType: 'up' | 'down') => {
@@ -176,6 +231,38 @@ export default function MapScreen() {
     }
   }, [votes, events]);
 
+  const handleInterested = useCallback(async (event: AppEvent) => {
+    const wasInterested = !!interestedMap[event.id];
+    const delta = wasInterested ? -1 : 1;
+
+    setAllEvents((prev) => prev.map((e) =>
+      e.id === event.id ? { ...e, interested: (e.interested ?? 0) + delta } : e
+    ));
+    setEvents((prev) => prev.map((e) =>
+      e.id === event.id ? { ...e, interested: (e.interested ?? 0) + delta } : e
+    ));
+    setSelectedEvent((prev) => {
+      if (!prev || prev.id !== event.id) return prev;
+      return { ...prev, interested: (prev.interested ?? 0) + delta };
+    });
+
+    setInterestedMap((prev) => {
+      const next = { ...prev };
+      if (wasInterested) delete next[event.id];
+      else next[event.id] = true;
+      return next;
+    });
+
+    try {
+      await Promise.all([
+        markInterested(event.id, wasInterested),
+        setInterestedLocal(event.id, !wasInterested),
+      ]);
+    } catch (e) {
+      console.warn('Interested failed:', e);
+    }
+  }, [interestedMap]);
+
   const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
 
   useEffect(() => {
@@ -195,13 +282,13 @@ export default function MapScreen() {
     };
   }, []);
 
-  // Filter events based on selected timeline time
+  // Filter events based on selected timeline time and category
   useEffect(() => {
     const selectedTime = timelineSnaps[timelineIndex].time.getTime();
     const filtered = allEvents.filter((event: any) => {
       const started = event.startTime.toMillis() <= selectedTime;
       const notEnded = event.endTime.toMillis() > selectedTime;
-      return started && notEnded;
+      return started && notEnded && activeCategories.has(event.category);
     });
     setEvents(filtered);
     // Clear selected event if it's no longer visible
@@ -209,18 +296,40 @@ export default function MapScreen() {
       if (!prev) return null;
       return filtered.find((e) => e.id === prev.id) ? prev : null;
     });
-  }, [allEvents, timelineIndex, timelineSnaps]);
+  }, [allEvents, timelineIndex, timelineSnaps, activeCategories]);
 
   const handleMapPress = useCallback((e: MapPressEvent) => {
     // Only dismiss if tapping the map itself, not a marker
     if (e.nativeEvent.action !== 'marker-press') {
       setSelectedEvent(null);
       setTimelineOpen(false);
+      setFiltersOpen(false);
+      setShowListView(false);
     }
   }, []);
 
-  const handleMarkerPress = useCallback((event: AppEvent) => {
+  const handleMarkerPress = useCallback(async (event: AppEvent) => {
     setSelectedEvent(event);
+    setFiltersOpen(false);
+    try {
+      const bounds = await mapRef.current?.getMapBoundaries();
+      if (bounds) {
+        const latSpan = bounds.northEast.latitude - bounds.southWest.latitude;
+        const lngSpan = bounds.northEast.longitude - bounds.southWest.longitude;
+        const margin = 0.25;
+        const innerNorth = bounds.northEast.latitude - latSpan * margin;
+        const innerSouth = bounds.southWest.latitude + latSpan * margin;
+        const innerEast = bounds.northEast.longitude - lngSpan * margin;
+        const innerWest = bounds.southWest.longitude + lngSpan * margin;
+        const isInner = event.latitude < innerNorth && event.latitude > innerSouth &&
+          event.longitude < innerEast && event.longitude > innerWest;
+        if (!isInner) {
+          mapRef.current?.animateCamera({
+            center: { latitude: event.latitude, longitude: event.longitude },
+          }, { duration: 300 });
+        }
+      }
+    } catch {}
   }, []);
 
   const handlePreviewPress = useCallback(() => {
@@ -239,6 +348,15 @@ export default function MapScreen() {
     });
   }, [selectedEvent, router]);
 
+  const eventsSortedByDistance = useMemo(() => {
+    if (!userLocation) return events;
+    return [...events].sort((a, b) => {
+      const distA = getDistance(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude);
+      const distB = getDistance(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude);
+      return distA - distB;
+    });
+  }, [events, userLocation]);
+
   const handleAdminPress = () => {
     if (isAdmin) {
       router.push('/admin');
@@ -255,6 +373,14 @@ export default function MapScreen() {
     } else {
       Alert.alert('Incorrect', 'Wrong passcode. Try again.');
     }
+  };
+
+  const formatDistance = (event: AppEvent): string | null => {
+    if (!userLocation) return null;
+    const miles = getDistance(userLocation.latitude, userLocation.longitude, event.latitude, event.longitude);
+    if (miles < 0.1) return '< 0.1 mi';
+    if (miles < 10) return `${miles.toFixed(1)} mi`;
+    return `${Math.round(miles)} mi`;
   };
 
   const formatTime = (millis: number) => {
@@ -277,10 +403,15 @@ export default function MapScreen() {
         customMapStyle={MAP_STYLE}
         showsUserLocation
         showsMyLocationButton
+        onUserLocationChange={(e) => {
+          const { latitude, longitude } = e.nativeEvent.coordinate;
+          setUserLocation({ latitude, longitude });
+        }}
         onPress={handleMapPress}
       >
         {events.map((event) => {
           const category = CATEGORIES[event.category];
+          if (!category) return null;
           return (
             <Marker
               key={event.id}
@@ -294,17 +425,72 @@ export default function MapScreen() {
                 handleMarkerPress(event);
               }}
             >
-              <View style={[styles.marker, { backgroundColor: category.color }]}>
-                <Text style={styles.markerEmoji}>{category.emoji}</Text>
+              <View style={styles.markerWrapper}>
+                <View style={[styles.marker, { backgroundColor: category.color }]}>
+                  <Text style={styles.markerEmoji}>{category.emoji}</Text>
+                </View>
+                <View style={[styles.markerArrow, { borderTopColor: category.color }]} />
               </View>
-              <View style={[styles.markerArrow, { borderTopColor: category.color }]} />
-              <Callout tooltip>
-                <View />
-              </Callout>
             </Marker>
           );
         })}
       </MapView>
+
+      {/* Category filter toggle + pills */}
+      {!selectedEvent && (
+        <View style={styles.filterContainer}>
+          <TouchableOpacity
+            style={styles.filterToggle}
+            onPress={() => setFiltersOpen((v) => !v)}
+            activeOpacity={0.7}
+          >
+            {filtersOpen ? (
+              <Text style={styles.filterToggleIcon}>✕</Text>
+            ) : (
+              <View style={styles.layersIcon}>
+                <View style={[styles.layersDiamond]} />
+                <View style={[styles.layersDiamond, styles.layersDiamondMid]} />
+                <View style={[styles.layersDiamond, styles.layersDiamondBack]} />
+              </View>
+            )}
+          </TouchableOpacity>
+          {filtersOpen && CATEGORY_LIST.map((key, i) => {
+            const cat = CATEGORIES[key];
+            const active = activeCategories.has(key);
+            return (
+              <Animated.View
+                key={key}
+                style={{
+                  opacity: filterAnim,
+                  transform: [{
+                    scale: filterAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [0.5, 1],
+                    }),
+                  }, {
+                    translateY: filterAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [-8, 0],
+                    }),
+                  }],
+                }}
+              >
+                <TouchableOpacity
+                  style={[
+                    styles.filterPill,
+                    { backgroundColor: active ? cat.color : 'rgba(30, 30, 30, 0.5)' },
+                    !active && styles.filterPillInactive,
+                  ]}
+                  onPress={() => toggleCategory(key)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.filterEmoji}>{cat.emoji}</Text>
+                </TouchableOpacity>
+              </Animated.View>
+            );
+          })}
+        </View>
+      )}
 
       {selectedEvent && (
         <View style={styles.previewWrapper}>
@@ -327,13 +513,39 @@ export default function MapScreen() {
                   </Text>
                 ) : null}
                 <Text style={styles.previewTime}>
-                  {formatTime(selectedEvent.startTime.toMillis())} —{' '}
-                  {formatTime(selectedEvent.endTime.toMillis())}
+                  {formatTime(selectedEvent.startTime.toMillis())} — {formatTime(selectedEvent.endTime.toMillis())}
+                  {formatDistance(selectedEvent) && (
+                    <Text style={styles.previewDistance}> · {formatDistance(selectedEvent)}</Text>
+                  )}
                 </Text>
               </View>
             </View>
           </TouchableOpacity>
-          {timelineIndex === 0 && (
+          {selectedEvent.sourceUrl && (
+            <TouchableOpacity
+              style={styles.sourceLink}
+              onPress={() => Linking.openURL(selectedEvent.sourceUrl!)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.sourceLinkText}>View details →</Text>
+            </TouchableOpacity>
+          )}
+          {selectedEvent.startTime.toMillis() > Date.now() ? (
+            <View style={styles.interestedRow}>
+              <TouchableOpacity
+                style={[styles.interestedButton, interestedMap[selectedEvent.id] && styles.interestedButtonActive]}
+                onPress={() => handleInterested(selectedEvent)}
+                activeOpacity={0.8}
+              >
+                <Text style={styles.interestedStar}>{interestedMap[selectedEvent.id] ? '⭐' : '☆'}</Text>
+                <Text style={[styles.interestedText, interestedMap[selectedEvent.id] && styles.interestedTextActive]}>
+                  {(selectedEvent.interested ?? 0) > 0
+                    ? `${selectedEvent.interested} interested`
+                    : 'Interested'}
+                </Text>
+              </TouchableOpacity>
+            </View>
+          ) : (
             <View style={styles.floatingVotes}>
               <TouchableOpacity
                 style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'up' && styles.floatingVoteActive]}
@@ -368,14 +580,14 @@ export default function MapScreen() {
         >
           <View style={styles.timelinePillDot} />
           <Text style={styles.timelinePillText}>
-            {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
+            {timelineVisualIndex === 0 ? 'Now' : timelineSnaps[timelineVisualIndex].label}
           </Text>
         </TouchableOpacity>
       ) : (
         <View style={styles.timelineContainer}>
           <View style={styles.timelineHeader}>
             <Text style={styles.timelineLabel}>
-              {timelineSnaps[timelineIndex].label}
+              {timelineSnaps[timelineVisualIndex].label}
             </Text>
             <TouchableOpacity onPress={() => setTimelineOpen(false)}>
               <Text style={styles.timelineClose}>✕</Text>
@@ -391,7 +603,7 @@ export default function MapScreen() {
             onResponderMove={handleTimelineMove}
           >
             {timelineSnaps.map((snap, i) => {
-              const isActive = i === timelineIndex;
+              const isActive = i === timelineVisualIndex;
               const isDay = snap.label.includes('12AM') || i === 0;
               return (
                 <View
@@ -407,7 +619,7 @@ export default function MapScreen() {
                       isActive && styles.timelineDotActive,
                     ]}
                   />
-                  {isDay && (
+                  {isDay && !isActive && (
                     <Text style={styles.timelineTickLabel}>
                       {i === 0 ? 'Now' : snap.label.split(' ')[0]}
                     </Text>
@@ -419,9 +631,66 @@ export default function MapScreen() {
         </View>
       )}
 
-      <TouchableOpacity style={styles.adminButton} onPress={handleAdminPress}>
-        <Text style={styles.adminButtonText}>{isAdmin ? '＋' : '⚙'}</Text>
+      <TouchableOpacity
+        style={styles.listToggleButton}
+        onPress={() => setShowListView((v) => !v)}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.listToggleText}>{showListView ? '🗺' : '☰'}</Text>
       </TouchableOpacity>
+
+      {showListView && (
+        <View style={styles.listOverlay}>
+          <View style={styles.listHeader}>
+            <Text style={styles.listTitle}>Nearby</Text>
+            <TouchableOpacity onPress={() => setShowListView(false)}>
+              <Text style={styles.listClose}>✕</Text>
+            </TouchableOpacity>
+          </View>
+          <ScrollView style={styles.listScroll}>
+            {eventsSortedByDistance.map((event) => {
+              const category = CATEGORIES[event.category];
+              if (!category) return null;
+              return (
+                <TouchableOpacity
+                  key={event.id}
+                  style={styles.listItem}
+                  onPress={() => {
+                    setShowListView(false);
+                    setSelectedEvent(event);
+                    mapRef.current?.animateToRegion({
+                      latitude: event.latitude,
+                      longitude: event.longitude,
+                      latitudeDelta: 0.01,
+                      longitudeDelta: 0.01,
+                    }, 300);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <View style={[styles.listItemDot, { backgroundColor: category.color }]}>
+                    <Text style={styles.listItemEmoji}>{category.emoji}</Text>
+                  </View>
+                  <View style={styles.listItemContent}>
+                    <Text style={styles.listItemTitle} numberOfLines={1}>{event.title}</Text>
+                    {event.location ? (
+                      <Text style={styles.listItemLocation} numberOfLines={1}>{event.location}</Text>
+                    ) : null}
+                    <Text style={styles.listItemMeta}>
+                      {formatTime(event.startTime.toMillis())}
+                      {formatDistance(event) && (
+                        <Text style={styles.listItemDistance}> · {formatDistance(event)}</Text>
+                      )}
+                    </Text>
+                  </View>
+                  {(event.interested ?? 0) > 0 && (
+                    <Text style={styles.listItemInterested}>⭐ {event.interested}</Text>
+                  )}
+                </TouchableOpacity>
+              );
+            })}
+          </ScrollView>
+        </View>
+      )}
 
       <AdminPasscodeModal
         visible={showPasscodeModal}
@@ -475,6 +744,10 @@ const styles = StyleSheet.create({
   map: {
     flex: 1,
   },
+  markerWrapper: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   marker: {
     width: 40,
     height: 40,
@@ -502,6 +775,76 @@ const styles = StyleSheet.create({
     borderRightColor: 'transparent',
     alignSelf: 'center',
     marginTop: -2,
+  },
+  filterContainer: {
+    position: 'absolute',
+    top: 60,
+    right: 16,
+    flexDirection: 'column',
+    alignItems: 'center',
+    gap: 8,
+  },
+  filterToggle: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  filterToggleIcon: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
+  },
+  layersIcon: {
+    width: 22,
+    height: 22,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  layersDiamond: {
+    position: 'absolute',
+    width: 12,
+    height: 12,
+    borderRadius: 1,
+    borderWidth: 1.5,
+    borderColor: 'rgba(255, 255, 255, 0.9)',
+    transform: [{ rotate: '45deg' }],
+    top: 1,
+  },
+  layersDiamondMid: {
+    top: 5,
+    opacity: 0.7,
+  },
+  layersDiamondBack: {
+    top: 9,
+    opacity: 0.4,
+  },
+  filterPill: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  filterPillInactive: {
+    opacity: 0.5,
+  },
+  filterEmoji: {
+    fontSize: 22,
   },
   previewWrapper: {
     position: 'absolute',
@@ -545,6 +888,55 @@ const styles = StyleSheet.create({
   previewTime: {
     fontSize: 13,
     color: '#999',
+  },
+  previewDistance: {
+    color: '#2a7cff',
+    fontWeight: '600',
+  },
+  cardActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingBottom: 10,
+  },
+  sourceLink: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    marginTop: -20,
+  },
+  sourceLinkText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#2a7cff',
+  },
+  interestedRow: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    marginTop: 8,
+    marginRight: 12,
+  },
+  interestedButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#f0f0f0',
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    gap: 6,
+  },
+  interestedButtonActive: {
+    backgroundColor: '#fff3cd',
+  },
+  interestedStar: {
+    fontSize: 14,
+  },
+  interestedText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#666',
+  },
+  interestedTextActive: {
+    color: '#b8860b',
   },
   floatingVotes: {
     flexDirection: 'row',
@@ -644,12 +1036,12 @@ const styles = StyleSheet.create({
     position: 'absolute',
     top: 0,
     alignItems: 'center',
-    transform: [{ translateX: -6 }],
+    transform: [{ translateX: -3 }],
   },
   timelineDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
+    width: 6,
+    height: 6,
+    borderRadius: 3,
     backgroundColor: 'rgba(255, 255, 255, 0.3)',
   },
   timelineDotActive: {
@@ -657,12 +1049,107 @@ const styles = StyleSheet.create({
     width: 14,
     height: 14,
     borderRadius: 7,
-    marginTop: -2,
+    marginTop: -4,
   },
   timelineTickLabel: {
     color: 'rgba(255, 255, 255, 0.5)',
     fontSize: 9,
     marginTop: 4,
+  },
+  listToggleButton: {
+    position: 'absolute',
+    bottom: 40,
+    left: 20,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  listToggleText: {
+    color: '#fff',
+    fontSize: 22,
+  },
+  listOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: '#fff',
+    zIndex: 100,
+  },
+  listHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingTop: 60,
+    paddingHorizontal: 20,
+    paddingBottom: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+  },
+  listTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+  listClose: {
+    fontSize: 20,
+    color: '#999',
+    padding: 8,
+  },
+  listScroll: {
+    flex: 1,
+  },
+  listItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 20,
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  listItemDot: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
+  },
+  listItemEmoji: {
+    fontSize: 18,
+  },
+  listItemContent: {
+    flex: 1,
+  },
+  listItemTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#1a1a1a',
+    marginBottom: 2,
+  },
+  listItemLocation: {
+    fontSize: 13,
+    color: '#666',
+    marginBottom: 2,
+  },
+  listItemMeta: {
+    fontSize: 12,
+    color: '#999',
+  },
+  listItemDistance: {
+    color: '#2a7cff',
+    fontWeight: '600',
+  },
+  listItemInterested: {
+    fontSize: 12,
+    color: '#b8860b',
+    fontWeight: '600',
+    marginLeft: 8,
   },
   adminButton: {
     position: 'absolute',
@@ -671,7 +1158,7 @@ const styles = StyleSheet.create({
     width: 50,
     height: 50,
     borderRadius: 25,
-    backgroundColor: '#333',
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',

@@ -94,3 +94,13 @@ export async function voteOnEvent(
   await updateDoc(ref, updates);
 }
 
+export async function markInterested(
+  eventId: string,
+  wasInterested: boolean
+): Promise<void> {
+  const ref = doc(db, EVENTS_COLLECTION, eventId);
+  await updateDoc(ref, {
+    interested: increment(wasInterested ? -1 : 1),
+  });
+}
+

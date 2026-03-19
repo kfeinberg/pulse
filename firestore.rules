@@ -4,7 +4,7 @@ service cloud.firestore {
     match /events/{eventId} {
       allow read: if true;
       allow update: if request.resource.data.diff(resource.data).affectedKeys()
-        .hasOnly(['thumbsUp', 'thumbsDown']);
+        .hasOnly(['thumbsUp', 'thumbsDown', 'interested']);
       allow create, delete: if false;
     }
   }

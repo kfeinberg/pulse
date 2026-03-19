@@ -13,6 +13,8 @@ export interface AppEvent {
   startTime: Timestamp;
   endTime: Timestamp;
   createdAt: Timestamp;
+  sourceUrl?: string;
   thumbsUp?: number;
   thumbsDown?: number;
+  interested?: number;
 }

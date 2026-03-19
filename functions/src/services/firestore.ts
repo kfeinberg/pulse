@@ -143,6 +143,7 @@ export async function writeScrapedEvents(
       longitude: geo.longitude,
       startTime: Timestamp.fromDate(startDate),
       endTime: Timestamp.fromDate(endDate),
+      sourceUrl: event.sourceUrl || null,
       createdAt: Timestamp.now(),
     });
 
