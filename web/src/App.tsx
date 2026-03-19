@@ -359,7 +359,11 @@ export function App() {
               style={styles.sourceLink}
               onClick={(e) => e.stopPropagation()}
             >
-              View details →
+              {(() => {
+                try { return new URL(selectedEvent.sourceUrl).hostname.replace('www.', ''); }
+                catch { return selectedEvent.sourceUrl; }
+              })()}
+              {' '}→
             </a>
           )}
           {selectedEvent.startTime.toMillis() > Date.now() ? (

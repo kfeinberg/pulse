@@ -185,7 +185,7 @@ export function createDiceScraper(apiKey: string): EventSource {
       );
       console.log(`Claude returned ${parsedEvents.length} categorized events`);
 
-      // Step 4: Overlay geo coordinates from JSON-LD
+      // Step 4: Overlay geo coordinates and individual event URLs from JSON-LD
       for (const parsed of parsedEvents) {
         const match = allDetails.find(
           ({ event }) =>
@@ -194,9 +194,12 @@ export function createDiceScraper(apiKey: string): EventSource {
               .toLowerCase()
               .includes(event.name.toLowerCase().slice(0, 20))
         );
-        if (match?.event.location?.geo) {
-          parsed.latitude = match.event.location.geo.latitude;
-          parsed.longitude = match.event.location.geo.longitude;
+        if (match) {
+          if (match.event.location?.geo) {
+            parsed.latitude = match.event.location.geo.latitude;
+            parsed.longitude = match.event.location.geo.longitude;
+          }
+          parsed.sourceUrl = match.url;
         }
       }
 
