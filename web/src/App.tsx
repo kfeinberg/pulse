@@ -194,7 +194,9 @@ export function App() {
     const rect = trackRef.current.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const index = Math.round(fraction * (timelineSnaps.length - 1));
+    const rawIndex = fraction * (timelineSnaps.length - 1);
+    // Snap to "Now" (index 0) more easily to prevent flickering
+    const index = rawIndex < 0.8 ? 0 : Math.round(rawIndex);
     setTimelineIndex(index);
   }, [timelineSnaps.length]);
 
@@ -413,27 +415,21 @@ export function App() {
         </div>
       )}
 
-      {/* Timeline */}
-      {!timelineOpen ? (
-        <div style={styles.timelinePill} onClick={() => setTimelineOpen(true)}>
+      {/* Timeline bar */}
+      <div style={{
+        ...styles.timelineBar,
+        ...(timelineOpen ? {} : { right: 'auto' }),
+      }}>
+        <div
+          style={styles.timelinePill}
+          onClick={() => setTimelineOpen((v) => !v)}
+        >
           <div style={styles.timelinePillDot} />
-          <span style={styles.timelinePillText}>
+          <span style={{ ...styles.timelinePillText, ...(timelineOpen ? { minWidth: 72 } : {}) }}>
             {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
           </span>
         </div>
-      ) : (
-        <div style={styles.timelineContainer}>
-          <div style={styles.timelineHeader}>
-            <span style={styles.timelineLabel}>
-              {timelineSnaps[timelineIndex].label}
-            </span>
-            <span
-              style={styles.timelineClose}
-              onClick={() => setTimelineOpen(false)}
-            >
-              ✕
-            </span>
-          </div>
+        {timelineOpen && (
           <div
             ref={trackRef}
             style={styles.timelineTrack}
@@ -441,9 +437,9 @@ export function App() {
             onTouchStart={handleTrackTouchStart}
             onTouchMove={handleTimelineDrag}
           >
+            <div style={styles.trackLine} />
             {timelineSnaps.map((snap, i) => {
               const isActive = i === timelineIndex;
-              const isDay = snap.label.includes('12AM') || i === 0;
               const pct = (i / (timelineSnaps.length - 1)) * 100;
               return (
                 <div key={i} style={{ ...styles.dotWrapper, left: `${pct}%` }}>
@@ -453,17 +449,12 @@ export function App() {
                       ...(isActive ? styles.dotActive : {}),
                     }}
                   />
-                  {isDay && (
-                    <span style={styles.tickLabel}>
-                      {i === 0 ? 'Now' : snap.label.split(' ')[0]}
-                    </span>
-                  )}
                 </div>
               );
             })}
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* List toggle button */}
       <div
@@ -735,19 +726,28 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: '20px',
     color: '#444',
   },
-  timelinePill: {
+  timelineBar: {
     position: 'absolute',
-    bottom: 32,
+    bottom: 16,
     left: 16,
+    right: '30%',
     display: 'flex',
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 20,
-    padding: '10px 14px',
+    borderRadius: 22,
+    padding: '0 6px 0 0',
+    gap: 0,
+    userSelect: 'none',
+  },
+  timelinePill: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: '10px 16px',
     gap: 8,
     cursor: 'pointer',
-    userSelect: 'none',
+    flexShrink: 0,
   },
   timelinePillDot: {
     width: 10,
@@ -759,63 +759,45 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     fontSize: 13,
     fontWeight: 600,
-  },
-  timelineContainer: {
-    position: 'absolute',
-    bottom: 32,
-    left: 16,
-    right: 16,
-    maxWidth: 600,
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 16,
-    padding: '10px 12px 8px',
-    userSelect: 'none',
-  },
-  timelineHeader: {
-    display: 'flex',
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  timelineLabel: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 700,
-    flex: 1,
-    textAlign: 'center',
-  },
-  timelineClose: {
-    color: 'rgba(255, 255, 255, 0.6)',
-    fontSize: 16,
-    paddingLeft: 8,
-    cursor: 'pointer',
+    whiteSpace: 'nowrap',
   },
   timelineTrack: {
     position: 'relative',
-    height: 36,
+    height: 20,
+    flex: 1,
     cursor: 'pointer',
+    marginRight: 10,
+    display: 'flex',
+    alignItems: 'center',
+  },
+  trackLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderRadius: 1,
   },
   dotWrapper: {
     position: 'absolute',
-    top: 0,
+    top: '50%',
+    transform: 'translate(-50%, -50%)',
     display: 'flex',
-    flexDirection: 'column',
     alignItems: 'center',
-    transform: 'translateX(-50%)',
+    justifyContent: 'center',
   },
   dot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
   },
   dotActive: {
     width: 14,
     height: 14,
     borderRadius: 7,
     backgroundColor: '#fff',
-    marginTop: -2,
+    boxShadow: '0 0 8px rgba(255,255,255,0.5)',
   },
   filterContainer: {
     position: 'absolute',
@@ -919,7 +901,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   listToggleButton: {
     position: 'absolute',
-    bottom: 76,
+    bottom: 60,
     left: 16,
     width: 40,
     height: 40,
@@ -938,15 +920,17 @@ const styles: Record<string, React.CSSProperties> = {
   },
   listPanel: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    bottom: 0,
-    width: 360,
+    bottom: 108,
+    left: 16,
+    width: 340,
+    maxHeight: 'calc(100% - 140px)',
     backgroundColor: '#fff',
+    borderRadius: 16,
     zIndex: 50,
     display: 'flex',
     flexDirection: 'column',
-    boxShadow: '4px 0 16px rgba(0,0,0,0.1)',
+    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+    overflow: 'hidden',
   },
   listHeader: {
     padding: '20px 20px 16px',
@@ -1018,11 +1002,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 600,
     marginLeft: 8,
     flexShrink: 0,
-  },
-  tickLabel: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontSize: 9,
-    marginTop: 4,
   },
   welcomeBackdrop: {
     position: 'absolute',
