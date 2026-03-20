@@ -31,7 +31,13 @@ export function stripHtml(html: string): string {
   // Remove SVG blocks
   cleaned = cleaned.replace(/<svg[\s\S]*?<\/svg>/gi, "");
 
-  // Remove all HTML tags, keep text content
+  // Preserve links: convert <a href="url">text</a> to text (url)
+  cleaned = cleaned.replace(
+    /<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_, href, text) => `${text.replace(/<[^>]+>/g, "")} (${href})`
+  );
+
+  // Remove all remaining HTML tags, keep text content
   cleaned = cleaned.replace(/<[^>]+>/g, " ");
 
   // Decode common HTML entities
@@ -80,6 +86,7 @@ async function resolveVagueLocations(
     endTime: string;
     location: string;
     category: string;
+    url?: string;
   }>,
   client: Anthropic
 ): Promise<typeof events> {
@@ -144,7 +151,7 @@ async function sendToClaude(
   sourceUrl: string,
   apiKey: string
 ): Promise<ScrapedEvent[]> {
-  const client = new Anthropic({ apiKey });
+  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
 
   const truncatedContent = content.slice(0, 100_000);
   console.log(
@@ -155,7 +162,7 @@ async function sendToClaude(
   try {
     message = await client.messages.create({
       model: "claude-haiku-4-5-20251001",
-      max_tokens: 16384,
+      max_tokens: 32768,
       messages: [
         {
           role: "user",
@@ -185,6 +192,7 @@ async function sendToClaude(
     endTime: string;
     location: string;
     category: string;
+    url?: string;
   }>;
 
   try {
@@ -206,13 +214,18 @@ async function sendToClaude(
     const dateStr = e.date || new Date().toISOString().split("T")[0];
     const startTimeStr = e.startTime || "12:00";
     const endTimeStr = e.endTime || "23:59";
-    // Store times as-is (EST) — no timezone conversion
-    const startTimestamp = new Date(`${dateStr}T${startTimeStr}:00`).getTime();
-    let endTimestamp = new Date(`${dateStr}T${endTimeStr}:00`).getTime();
+    // Determine if date is in EDT (Mar-Nov) or EST (Nov-Mar)
+    const testDate = new Date(`${dateStr}T12:00:00Z`);
+    const month = testDate.getUTCMonth(); // 0-indexed
+    const isDST = month >= 2 && month <= 10; // rough EDT: Mar–Oct
+    const tzOffset = isDST ? "-04:00" : "-05:00";
+    // Parse times as Eastern Time
+    const startTimestamp = new Date(`${dateStr}T${startTimeStr}:00${tzOffset}`).getTime();
+    let endTimestamp = new Date(`${dateStr}T${endTimeStr}:00${tzOffset}`).getTime();
     // If end time is before start time, the event crosses midnight — bump end to next day
     if (endTimestamp <= startTimestamp) {
       const nextDay = new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-      endTimestamp = new Date(`${nextDay}T${endTimeStr}:00`).getTime();
+      endTimestamp = new Date(`${nextDay}T${endTimeStr}:00${tzOffset}`).getTime();
     }
     console.log(`Parsed event: "${e.title}" date=${dateStr} start=${startTimeStr} end=${endTimeStr} startTs=${startTimestamp} endTs=${endTimestamp} category=${e.category}`);
     return {
@@ -222,7 +235,19 @@ async function sendToClaude(
       endTimestamp,
       location: e.location || "",
       category: (["popup", "free_stuff", "happening", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
-      sourceUrl,
+      sourceUrl: (() => {
+        if (!e.url) return sourceUrl;
+        // Normalize relative URLs using the source's origin
+        if (e.url.startsWith("/")) {
+          try {
+            const origin = new URL(sourceUrl).origin;
+            return `${origin}${e.url}`;
+          } catch {
+            return sourceUrl;
+          }
+        }
+        return e.url;
+      })(),
       sourceName,
     };
   });

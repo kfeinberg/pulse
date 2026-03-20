@@ -17,7 +17,7 @@ async function geocodeWithClaude(
   const fallback: GeoResult = { latitude: 40.7128, longitude: -74.006 };
   if (!location) return fallback;
 
-  const client = new Anthropic({ apiKey });
+  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
 
   const message = await client.messages.create({
     model: "claude-haiku-4-5-20251001",

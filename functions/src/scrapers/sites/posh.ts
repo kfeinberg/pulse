@@ -56,7 +56,12 @@ function extractText(html: string): string {
   cleaned = cleaned.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
   // Remove HTML comments
   cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, " ");
-  // Remove all tags but keep text
+  // Preserve links: convert <a href="url">text</a> to text (url)
+  cleaned = cleaned.replace(
+    /<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+    (_, href, text) => `${text.replace(/<[^>]+>/g, "")} (${href})`
+  );
+  // Remove all remaining tags but keep text
   cleaned = cleaned.replace(/<[^>]+>/g, " ");
   // Decode entities
   cleaned = cleaned

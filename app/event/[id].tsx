@@ -1,17 +1,18 @@
 import React from 'react';
-import { StyleSheet, View, Text, ScrollView } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking } from 'react-native';
 import { useLocalSearchParams } from 'expo-router';
 import { CATEGORIES } from '@/constants/categories';
 import { EventCategory } from '@/types';
 
 export default function EventDetailScreen() {
-  const { title, category, description, startTime, endTime } = useLocalSearchParams<{
+  const { title, category, description, startTime, endTime, sourceUrl } = useLocalSearchParams<{
     id: string;
     title: string;
     category: EventCategory;
     description: string;
     startTime: string;
     endTime: string;
+    sourceUrl: string;
   }>();
 
   const categoryConfig = CATEGORIES[category as EventCategory];
@@ -50,6 +51,20 @@ export default function EventDetailScreen() {
         <View style={styles.descriptionContainer}>
           <Text style={styles.description}>{description}</Text>
         </View>
+      ) : null}
+      {sourceUrl ? (
+        <TouchableOpacity
+          style={styles.sourceLink}
+          onPress={() => Linking.openURL(sourceUrl)}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.sourceLinkText}>
+            {(() => {
+              try { return new URL(sourceUrl).hostname.replace('www.', ''); }
+              catch { return sourceUrl; }
+            })()}{' '}→
+          </Text>
+        </TouchableOpacity>
       ) : null}
     </ScrollView>
   );
@@ -101,5 +116,15 @@ const styles = StyleSheet.create({
     fontSize: 16,
     lineHeight: 24,
     color: '#444',
+  },
+  sourceLink: {
+    marginHorizontal: 24,
+    marginTop: 20,
+    alignItems: 'center',
+  },
+  sourceLinkText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#2a7cff',
   },
 });

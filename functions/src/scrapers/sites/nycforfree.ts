@@ -115,12 +115,17 @@ export function createNycForFreeScraper(apiKey: string): EventSource {
             hour: "2-digit", minute: "2-digit", hour12: false,
           });
 
+        const eventUrl = item.fullUrl
+          ? `https://www.nycforfree.co${item.fullUrl}`
+          : "";
+
         eventTexts.push(
           `Event: ${item.title}\n` +
           `Description: ${description}\n` +
           `Start (Eastern Time): ${formatET(startDate)}\n` +
           `End (Eastern Time): ${endDate ? formatET(endDate) : "unknown"}\n` +
-          `Location: ${locationParts.join(", ")}`
+          `Location: ${locationParts.join(", ")}` +
+          (eventUrl ? `\nURL: ${eventUrl}` : "")
         );
       }
 
@@ -135,6 +140,21 @@ export function createNycForFreeScraper(apiKey: string): EventSource {
 
       const results = await parseEventsFromText(fullText, "nycforfree", BASE_URL, apiKey);
       console.log(`Claude returned ${results.length} events`);
+
+      // Map individual event URLs back to parsed events
+      for (const parsed of results) {
+        const match = allItems.find(
+          (item) =>
+            item.title &&
+            parsed.title
+              .toLowerCase()
+              .includes(item.title.toLowerCase().slice(0, 20))
+        );
+        if (match?.fullUrl) {
+          parsed.sourceUrl = `https://www.nycforfree.co${match.fullUrl}`;
+        }
+      }
+
       return results;
     },
   };

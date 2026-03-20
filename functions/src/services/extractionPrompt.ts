@@ -10,6 +10,7 @@ For each event, extract:
 - endTime: end time in HH:MM format (24h), or "" if unknown
 - location: the venue name and/or address in NYC
 - category: "popup", "free_stuff", "happening", "bars", "clubs", or "concerts" (see rules below)
+- url: the URL linking to this specific event's detail page, or "" if not found. Look for URLs near the event title or in parentheses after the event name. Only include URLs that point to a specific event page, NOT a general calendar or listing page.
 
 CATEGORY RULES:
 
@@ -71,7 +72,7 @@ RESPONSE FORMAT:
 
 Return ONLY a valid JSON array. No markdown fences, no backticks, no commentary, no explanation — just the raw JSON array starting with [ and ending with ].
 
-Every object in the array MUST have exactly these 7 fields:
+Every object in the array MUST have exactly these 8 fields:
 - "title" (string)
 - "description" (string)
 - "date" (string, YYYY-MM-DD)
@@ -79,6 +80,7 @@ Every object in the array MUST have exactly these 7 fields:
 - "endTime" (string, HH:MM 24h format)
 - "location" (string)
 - "category" (string, one of: "popup", "free_stuff", "happening", "bars", "clubs", "concerts")
+- "url" (string, specific event page URL or "")
 
 If there are no matching events, return an empty array: []
 
@@ -91,7 +93,8 @@ Example of a correct response:
     "startTime": "10:00",
     "endTime": "11:00",
     "location": "Central Park Great Lawn",
-    "category": "free_stuff"
+    "category": "free_stuff",
+    "url": "https://example.com/events/free-yoga-july-15"
   },
   {
     "title": "Nike Pop-Up Shop",
@@ -100,6 +103,7 @@ Example of a correct response:
     "startTime": "11:00",
     "endTime": "19:00",
     "location": "123 Broadway",
-    "category": "popup"
+    "category": "popup",
+    "url": ""
   }
 ]`;

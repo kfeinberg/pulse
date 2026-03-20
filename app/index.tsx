@@ -344,6 +344,7 @@ export default function MapScreen() {
         location: selectedEvent.location ?? '',
         startTime: selectedEvent.startTime.toMillis().toString(),
         endTime: selectedEvent.endTime.toMillis().toString(),
+        sourceUrl: selectedEvent.sourceUrl ?? '',
       },
     });
   }, [selectedEvent, router]);
@@ -521,15 +522,6 @@ export default function MapScreen() {
               </View>
             </View>
           </TouchableOpacity>
-          {selectedEvent.sourceUrl && (
-            <TouchableOpacity
-              style={styles.sourceLink}
-              onPress={() => Linking.openURL(selectedEvent.sourceUrl!)}
-              activeOpacity={0.7}
-            >
-              <Text style={styles.sourceLinkText}>View details →</Text>
-            </TouchableOpacity>
-          )}
           {selectedEvent.startTime.toMillis() > Date.now() ? (
             <View style={styles.interestedRow}>
               <TouchableOpacity
@@ -572,27 +564,18 @@ export default function MapScreen() {
         </View>
       )}
 
-      {!timelineOpen ? (
+      <View style={[styles.timelineBar, !timelineOpen && { right: 'auto' as any }]}>
         <TouchableOpacity
           style={styles.timelinePill}
-          onPress={() => setTimelineOpen(true)}
+          onPress={() => setTimelineOpen((v) => !v)}
           activeOpacity={0.8}
         >
           <View style={styles.timelinePillDot} />
-          <Text style={styles.timelinePillText}>
+          <Text style={[styles.timelinePillText, timelineOpen && { minWidth: 72 }]}>
             {timelineVisualIndex === 0 ? 'Now' : timelineSnaps[timelineVisualIndex].label}
           </Text>
         </TouchableOpacity>
-      ) : (
-        <View style={styles.timelineContainer}>
-          <View style={styles.timelineHeader}>
-            <Text style={styles.timelineLabel}>
-              {timelineSnaps[timelineVisualIndex].label}
-            </Text>
-            <TouchableOpacity onPress={() => setTimelineOpen(false)}>
-              <Text style={styles.timelineClose}>✕</Text>
-            </TouchableOpacity>
-          </View>
+        {timelineOpen && (
           <View
             ref={timelineTrackRef}
             style={styles.timelineTrack}
@@ -602,9 +585,9 @@ export default function MapScreen() {
             onResponderGrant={handleTimelineGrant}
             onResponderMove={handleTimelineMove}
           >
+            <View style={styles.trackLine} />
             {timelineSnaps.map((snap, i) => {
               const isActive = i === timelineVisualIndex;
-              const isDay = snap.label.includes('12AM') || i === 0;
               return (
                 <View
                   key={i}
@@ -619,17 +602,12 @@ export default function MapScreen() {
                       isActive && styles.timelineDotActive,
                     ]}
                   />
-                  {isDay && !isActive && (
-                    <Text style={styles.timelineTickLabel}>
-                      {i === 0 ? 'Now' : snap.label.split(' ')[0]}
-                    </Text>
-                  )}
                 </View>
               );
             })}
           </View>
-        </View>
-      )}
+        )}
+      </View>
 
       <TouchableOpacity
         style={styles.listToggleButton}
@@ -689,6 +667,13 @@ export default function MapScreen() {
               );
             })}
           </ScrollView>
+          <TouchableOpacity
+            style={styles.listMapButton}
+            onPress={() => setShowListView(false)}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.listMapButtonText}>◉</Text>
+          </TouchableOpacity>
         </View>
       )}
 
@@ -976,16 +961,22 @@ const styles = StyleSheet.create({
   floatingVoteCountActive: {
     color: '#fff',
   },
-  timelinePill: {
+  timelineBar: {
     position: 'absolute',
     bottom: 100,
     left: 16,
+    right: 16,
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 20,
+    borderRadius: 22,
+    paddingRight: 6,
+  },
+  timelinePill: {
+    flexDirection: 'row',
+    alignItems: 'center',
     paddingVertical: 10,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
     gap: 8,
   },
   timelinePillDot: {
@@ -999,62 +990,43 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
   },
-  timelineContainer: {
-    position: 'absolute',
-    bottom: 100,
-    left: 16,
-    right: 16,
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 16,
-    paddingTop: 10,
-    paddingBottom: 8,
-    paddingHorizontal: 12,
-  },
-  timelineHeader: {
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    marginBottom: 8,
-  },
-  timelineLabel: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: '700',
-    flex: 1,
-    textAlign: 'center',
-  },
-  timelineClose: {
-    color: 'rgba(255, 255, 255, 0.6)',
-    fontSize: 16,
-    paddingLeft: 8,
-  },
   timelineTrack: {
-    height: 36,
-    position: 'relative',
+    flex: 1,
+    height: 20,
+    marginRight: 10,
+    justifyContent: 'center',
+  },
+  trackLine: {
+    position: 'absolute',
+    left: 0,
+    right: 0,
+    height: 2,
+    backgroundColor: 'rgba(255, 255, 255, 0.15)',
+    borderRadius: 1,
   },
   timelineDotWrapper: {
     position: 'absolute',
-    top: 0,
+    top: '50%',
     alignItems: 'center',
-    transform: [{ translateX: -3 }],
+    justifyContent: 'center',
+    transform: [{ translateX: -3 }, { translateY: -3 }],
   },
   timelineDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.3)',
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
   },
   timelineDotActive: {
     backgroundColor: '#fff',
     width: 14,
     height: 14,
     borderRadius: 7,
-    marginTop: -4,
-  },
-  timelineTickLabel: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontSize: 9,
-    marginTop: 4,
+    shadowColor: '#fff',
+    shadowOffset: { width: 0, height: 0 },
+    shadowOpacity: 0.5,
+    shadowRadius: 4,
+    transform: [{ translateX: -7 }, { translateY: -7 }],
   },
   listToggleButton: {
     position: 'absolute',
@@ -1150,6 +1122,26 @@ const styles = StyleSheet.create({
     color: '#b8860b',
     fontWeight: '600',
     marginLeft: 8,
+  },
+  listMapButton: {
+    position: 'absolute',
+    bottom: 40,
+    left: 20,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  listMapButtonText: {
+    color: '#fff',
+    fontSize: 22,
   },
   adminButton: {
     position: 'absolute',
