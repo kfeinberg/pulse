@@ -19,6 +19,38 @@ export interface AppEvent {
   interested?: number;
 }
 
+export type ReportCategory = 'live_music' | 'free_stuff' | 'popup' | 'long_line' | 'street_performance' | 'other';
+
+export interface Report {
+  id: string;
+  text: string;
+  category: ReportCategory;
+  latitude: number;
+  longitude: number;
+  userId: string;
+  userName: string;
+  userPhoto?: string;
+  confirmations: number;
+  createdAt: Timestamp;
+  expiresAt: Timestamp;
+}
+
+export interface Comment {
+  id: string;
+  text: string;
+  userId: string;
+  userName: string;
+  userPhoto?: string;
+  createdAt: Timestamp;
+}
+
+export interface UserProfile {
+  uid: string;
+  displayName: string;
+  photoURL?: string;
+  createdAt: Timestamp;
+}
+
 export interface NewEventInput {
   title: string;
   description: string;

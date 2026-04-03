@@ -1,10 +1,19 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
-import { subscribeToUpcomingEvents, voteOnEvent, markInterested } from './firebase';
+import { subscribeToUpcomingEvents, voteOnEvent, markInterested, signInWithGoogle, signOut, onAuthChange, User, createReport, subscribeToReports, confirmReport, addComment, subscribeToComments, deleteEvent, deleteReport, getUserProfile, isDisplayNameTaken, setUserProfile } from './firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, VoteType } from './votes';
 import { CATEGORIES } from './categories';
 import { MAP_STYLE } from './mapStyle';
-import { AppEvent, EventCategory } from './types';
+import { AppEvent, EventCategory, Comment, Report, ReportCategory } from './types';
+
+const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
+  live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
+  free_stuff: { emoji: '🎁', label: 'Free Stuff', color: '#2ecc71' },
+  popup: { emoji: '✨', label: 'Pop-up', color: '#e67e22' },
+  long_line: { emoji: '🚶', label: 'Long Line', color: '#e74c3c' },
+  street_performance: { emoji: '🎭', label: 'Street Performance', color: '#3498db' },
+  other: { emoji: '📍', label: 'Other', color: '#95a5a6' },
+};
 
 const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
 const WELCOME_KEY = 'pulse_welcomed';
@@ -30,6 +39,97 @@ function getDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number
 }
 
 export function App() {
+  const [user, setUser] = useState<User | null>(null);
+  const [displayName, setDisplayName] = useState<string | null>(null);
+  const [showNameModal, setShowNameModal] = useState(false);
+  const [nameInput, setNameInput] = useState('');
+  const [nameError, setNameError] = useState<string | null>(null);
+  const [nameChecking, setNameChecking] = useState(false);
+
+  useEffect(() => {
+    const unsubscribe = onAuthChange(async (u) => {
+      setUser(u);
+      if (u) {
+        const profile = await getUserProfile(u.uid);
+        if (profile) {
+          setDisplayName(profile.displayName);
+        } else {
+          setShowNameModal(true);
+          setNameInput(u.displayName || '');
+        }
+      } else {
+        setDisplayName(null);
+        setShowNameModal(false);
+      }
+    });
+    return unsubscribe;
+  }, []);
+
+  const handleSetName = async () => {
+    const name = nameInput.trim();
+    if (!name || name.length < 2) {
+      setNameError('Name must be at least 2 characters');
+      return;
+    }
+    if (name.length > 20) {
+      setNameError('Name must be 20 characters or less');
+      return;
+    }
+    setNameChecking(true);
+    setNameError(null);
+    try {
+      const taken = await isDisplayNameTaken(name);
+      if (taken) {
+        setNameError('That name is already taken');
+        setNameChecking(false);
+        return;
+      }
+      await setUserProfile(user!.uid, name, user!.photoURL || undefined);
+      setDisplayName(name);
+      setShowNameModal(false);
+    } catch (err: any) {
+      setNameError(err.message || 'Something went wrong');
+    } finally {
+      setNameChecking(false);
+    }
+  };
+
+  return (
+    <>
+      {showNameModal && (
+        <div style={styles.welcomeBackdrop}>
+          <div style={styles.welcomeModal}>
+            <div style={styles.welcomeHeader}>
+              <div style={styles.welcomeDot} />
+              <span style={styles.welcomeTitle}>Pulse</span>
+            </div>
+            <p style={styles.authSubtitle}>Choose a display name</p>
+            <input
+              style={styles.nameInput}
+              placeholder="Display name"
+              value={nameInput}
+              onChange={(e) => setNameInput(e.target.value)}
+              maxLength={20}
+              onKeyDown={(e) => { if (e.key === 'Enter') handleSetName(); }}
+              autoFocus
+            />
+            {nameError && <p style={styles.nameError}>{nameError}</p>}
+            <button
+              style={{ ...styles.welcomeButton, opacity: nameChecking ? 0.6 : 1, marginTop: 12 }}
+              disabled={nameChecking}
+              onClick={handleSetName}
+            >
+              {nameChecking ? 'Checking...' : 'Continue'}
+            </button>
+          </div>
+        </div>
+      )}
+      <AppContent user={user} displayName={displayName} />
+    </>
+  );
+}
+
+function AppContent({ user, displayName }: { user: User | null; displayName: string | null }) {
   const { isLoaded } = useJsApiLoader({
     googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
   });
@@ -48,6 +148,17 @@ export function App() {
   );
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
   const [showListView, setShowListView] = useState(false);
+  const [reports, setReports] = useState<Report[]>([]);
+  const [pinDropMode, setPinDropMode] = useState(false);
+  const [pendingPin, setPendingPin] = useState<{ lat: number; lng: number } | null>(null);
+  const [reportText, setReportText] = useState('');
+  const [reportCategory, setReportCategory] = useState<ReportCategory>('other');
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const [reportError, setReportError] = useState<string | null>(null);
+  const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [comments, setComments] = useState<Comment[]>([]);
+  const [commentText, setCommentText] = useState('');
+  const [submittingComment, setSubmittingComment] = useState(false);
   const trackRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
 
@@ -174,6 +285,20 @@ export function App() {
     return () => unsubscribe();
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribeToReports(setReports);
+    return () => unsubscribe();
+  }, []);
+
+  useEffect(() => {
+    if (!selectedEvent) {
+      setComments([]);
+      return;
+    }
+    const unsubscribe = subscribeToComments(selectedEvent.id, setComments);
+    return () => unsubscribe();
+  }, [selectedEvent?.id]);
+
   // Filter by timeline and category
   useEffect(() => {
     const selectedTime = timelineSnaps[timelineIndex].time.getTime();
@@ -225,17 +350,24 @@ export function App() {
         mapContainerStyle={styles.map}
         center={NYC_CENTER}
         zoom={13}
-        options={{
-          styles: MAP_STYLE,
-          disableDefaultUI: true,
-          zoomControl: true,
-        }}
         onLoad={(map) => { mapInstanceRef.current = map; }}
-        onClick={() => {
+        onClick={(e) => {
+          if (pinDropMode && e.latLng) {
+            setPendingPin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
+            setPinDropMode(false);
+            return;
+          }
           setSelectedEvent(null);
+          setSelectedReport(null);
           setTimelineOpen(false);
           setFiltersOpen(false);
           setShowListView(false);
+        }}
+        options={{
+          styles: MAP_STYLE,
+          disableDefaultUI: true,
+          zoomControl: false,
+          draggableCursor: pinDropMode ? 'crosshair' : undefined,
         }}
       >
         {events.map((event) => {
@@ -251,6 +383,7 @@ export function App() {
                 onClick={(e) => {
                   e.stopPropagation();
                   setSelectedEvent(event);
+                  setSelectedReport(null);
                   const bounds = mapInstanceRef.current?.getBounds();
                   if (bounds) {
                     const ne = bounds.getNorthEast();
@@ -276,12 +409,75 @@ export function App() {
             </OverlayViewF>
           );
         })}
+        {/* Report pins */}
+        {reports.map((report) => {
+          const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
+          return (
+            <OverlayViewF
+              key={`report-${report.id}`}
+              position={{ lat: report.latitude, lng: report.longitude }}
+              mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+            >
+              <div
+                style={styles.markerWrapper}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  setSelectedReport(report);
+                  setSelectedEvent(null);
+                }}
+              >
+                <div style={{ ...styles.reportMarker, borderColor: cat.color }}>
+                  <span style={styles.markerEmoji}>{cat.emoji}</span>
+                </div>
+                <div style={{ ...styles.markerArrow, borderTopColor: cat.color }} />
+              </div>
+            </OverlayViewF>
+          );
+        })}
+        {/* Pending pin preview */}
+        {pendingPin && (
+          <OverlayViewF
+            position={pendingPin}
+            mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
+          >
+            <div style={styles.markerWrapper}>
+              <div style={styles.pendingMarker}>
+                <span style={styles.markerEmoji}>📍</span>
+              </div>
+              <div style={{ ...styles.markerArrow, borderTopColor: '#ff5252' }} />
+            </div>
+          </OverlayViewF>
+        )}
       </GoogleMap>
 
-      {/* Logo */}
+      {/* Logo + user */}
       <div style={styles.logo}>
         <div style={styles.logoDot} />
         <span style={styles.logoText}>Pulse</span>
+        {user ? (
+          <div
+            style={styles.userAvatar}
+            onClick={() => { if (confirm('Sign out?')) signOut(); }}
+            title={user.email || 'Sign out'}
+          >
+            {user.photoURL ? (
+              <img src={user.photoURL} style={styles.userAvatarImg} referrerPolicy="no-referrer" />
+            ) : (
+              <span style={styles.userAvatarText}>
+                {(user.displayName || user.email || '?')[0].toUpperCase()}
+              </span>
+            )}
+          </div>
+        ) : (
+          <div
+            style={styles.signInButton}
+            onClick={async () => {
+              try { await signInWithGoogle(); } catch {}
+            }}
+          >
+            Sign in
+          </div>
+        )}
       </div>
 
       {/* Category filter toggle + pills */}
@@ -327,6 +523,18 @@ export function App() {
       {/* Event preview card */}
       {selectedEvent && (
         <div style={styles.previewCard}>
+          {user?.email === 'kalli.feinberg@gmail.com' && (
+            <div
+              style={styles.adminDelete}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (confirm(`Delete "${selectedEvent.title}"?`)) {
+                  deleteEvent(selectedEvent.id);
+                  setSelectedEvent(null);
+                }
+              }}
+            >✕</div>
+          )}
           <div style={styles.previewContent}>
             <span style={styles.previewEmoji}>
               {CATEGORIES[selectedEvent.category]?.emoji}
@@ -416,6 +624,91 @@ export function App() {
               </button>
             </div>
           )}
+          {/* Comments section */}
+          <div style={styles.commentsSection}>
+            {comments.length > 0 && (
+              <div style={styles.commentsList}>
+                {comments.map((c) => (
+                  <div key={c.id} style={styles.commentItem}>
+                    <div style={styles.commentAvatar}>
+                      {c.userPhoto ? (
+                        <img src={c.userPhoto} style={styles.commentAvatarImg} referrerPolicy="no-referrer" />
+                      ) : (
+                        <span style={styles.commentAvatarText}>
+                          {(c.userName || '?')[0].toUpperCase()}
+                        </span>
+                      )}
+                    </div>
+                    <div style={styles.commentBody}>
+                      <span style={styles.commentAuthor}>{c.userName}</span>
+                      <span style={styles.commentText}>{c.text}</span>
+                    </div>
+                    <span style={styles.commentTime}>
+                      {(() => {
+                        const mins = Math.floor((Date.now() - c.createdAt.toMillis()) / 60000);
+                        if (mins < 1) return 'now';
+                        if (mins < 60) return `${mins}m`;
+                        return `${Math.floor(mins / 60)}h`;
+                      })()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            )}
+            {user ? (
+              <div style={styles.commentInputRow}>
+                <input
+                  style={styles.commentInput}
+                  placeholder="Add a comment..."
+                  value={commentText}
+                  onChange={(e) => setCommentText(e.target.value)}
+                  maxLength={280}
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && commentText.trim()) {
+                      e.preventDefault();
+                      const text = commentText.trim();
+                      setCommentText('');
+                      setSubmittingComment(true);
+                      addComment(selectedEvent.id, {
+                        text,
+                        userId: user.uid,
+                        userName: displayName || user.displayName || 'Anonymous',
+                        userPhoto: user.photoURL || undefined,
+                      }).finally(() => setSubmittingComment(false));
+                    }
+                  }}
+                />
+                <button
+                  style={{
+                    ...styles.commentSend,
+                    opacity: commentText.trim() && !submittingComment ? 1 : 0.4,
+                  }}
+                  disabled={!commentText.trim() || submittingComment}
+                  onClick={() => {
+                    if (!commentText.trim()) return;
+                    const text = commentText.trim();
+                    setCommentText('');
+                    setSubmittingComment(true);
+                    addComment(selectedEvent.id, {
+                      text,
+                      userId: user.uid,
+                      userName: displayName || user.displayName || 'Anonymous',
+                      userPhoto: user.photoURL || undefined,
+                    }).finally(() => setSubmittingComment(false));
+                  }}
+                >
+                  ↑
+                </button>
+              </div>
+            ) : (
+              <div
+                style={styles.commentSignIn}
+                onClick={() => signInWithGoogle().catch(() => {})}
+              >
+                Sign in to comment
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -467,6 +760,159 @@ export function App() {
       >
         <span style={styles.listToggleText}>{showListView ? '✕' : '☰'}</span>
       </div>
+
+      {/* Drop pin button */}
+      <div
+        style={{
+          ...styles.dropPinButton,
+          ...(pinDropMode ? styles.dropPinButtonActive : {}),
+        }}
+        onClick={() => {
+          if (!user) {
+            signInWithGoogle().catch(() => {});
+            return;
+          }
+          setPinDropMode((v) => !v);
+          setPendingPin(null);
+        }}
+      >
+        <span style={styles.dropPinText}>+</span>
+      </div>
+
+      {/* Pin drop mode banner */}
+      {pinDropMode && (
+        <div style={styles.pinDropBanner}>
+          Tap the map to drop a pin
+        </div>
+      )}
+
+      {/* Report form */}
+      {pendingPin && (
+        <div style={styles.reportForm} onClick={(e) => e.stopPropagation()} onMouseDown={(e) => e.stopPropagation()}>
+          <div style={styles.reportFormHeader}>
+            <span style={styles.reportFormTitle}>What's happening here?</span>
+            <span
+              style={styles.reportFormClose}
+              onClick={() => { setPendingPin(null); setReportText(''); setReportCategory('other'); }}
+            >✕</span>
+          </div>
+          <div style={styles.reportCategoryRow}>
+            {(Object.keys(REPORT_CATEGORIES) as ReportCategory[]).map((key) => {
+              const cat = REPORT_CATEGORIES[key];
+              const active = reportCategory === key;
+              return (
+                <div
+                  key={key}
+                  style={{
+                    ...styles.reportCategoryPill,
+                    backgroundColor: active ? cat.color : '#f0f0f0',
+                    color: active ? '#fff' : '#333',
+                  }}
+                  onClick={() => setReportCategory(key)}
+                >
+                  <span>{cat.emoji}</span>
+                  <span style={{ fontSize: 12 }}>{cat.label}</span>
+                </div>
+              );
+            })}
+          </div>
+          <input
+            style={styles.reportInput}
+            placeholder="Add a note (optional)"
+            value={reportText}
+            onChange={(e) => setReportText(e.target.value)}
+            maxLength={140}
+          />
+          {reportError && <p style={{ color: '#e74c3c', fontSize: 13, margin: '0 0 8px' }}>{reportError}</p>}
+          <button
+            style={{
+              ...styles.reportSubmit,
+              opacity: submittingReport ? 0.6 : 1,
+            }}
+            disabled={submittingReport}
+            onClick={async (e) => {
+              e.stopPropagation();
+              if (!user || !pendingPin) return;
+              setSubmittingReport(true);
+              setReportError(null);
+              try {
+                await createReport({
+                  text: reportText || REPORT_CATEGORIES[reportCategory].label,
+                  category: reportCategory,
+                  latitude: pendingPin.lat,
+                  longitude: pendingPin.lng,
+                  userId: user.uid,
+                  userName: displayName || user.displayName || 'Anonymous',
+                  userPhoto: user.photoURL || undefined,
+                });
+                setPendingPin(null);
+                setReportText('');
+                setReportCategory('other');
+              } catch (err: any) {
+                console.error('Failed to create report:', err);
+                setReportError(err.message || 'Failed to drop pin');
+              } finally {
+                setSubmittingReport(false);
+              }
+            }}
+          >
+            {submittingReport ? 'Posting...' : 'Drop Pin'}
+          </button>
+        </div>
+      )}
+
+      {/* Selected report card */}
+      {selectedReport && (
+        <div style={styles.previewCard}>
+          {user?.email === 'kalli.feinberg@gmail.com' && (
+            <div
+              style={styles.adminDelete}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (confirm(`Delete this report?`)) {
+                  deleteReport(selectedReport.id);
+                  setSelectedReport(null);
+                }
+              }}
+            >✕</div>
+          )}
+          <div style={styles.previewContent}>
+            <span style={styles.previewEmoji}>
+              {REPORT_CATEGORIES[selectedReport.category]?.emoji || '📍'}
+            </span>
+            <div style={styles.previewText}>
+              <div style={styles.previewTitle}>{selectedReport.text}</div>
+              <div style={styles.previewMeta}>
+                <span>
+                  {selectedReport.userName} · {(() => {
+                    const mins = Math.floor((Date.now() - selectedReport.createdAt.toMillis()) / 60000);
+                    if (mins < 1) return 'just now';
+                    if (mins < 60) return `${mins}m ago`;
+                    return `${Math.floor(mins / 60)}h ago`;
+                  })()}
+                </span>
+              </div>
+            </div>
+          </div>
+          <div style={styles.cardActions}>
+            <button
+              style={styles.confirmButton}
+              onClick={(e) => {
+                e.stopPropagation();
+                confirmReport(selectedReport.id);
+                setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+              }}
+            >
+              <span>👍</span>
+              <span style={styles.confirmText}>
+                {selectedReport.confirmations > 0
+                  ? `${selectedReport.confirmations} confirmed`
+                  : 'Still happening'}
+              </span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* List view panel */}
       {showListView && (
@@ -563,6 +1009,87 @@ export function App() {
 }
 
 const styles: Record<string, React.CSSProperties> = {
+  authScreen: {
+    width: '100%',
+    height: '100%',
+    backgroundColor: '#111',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  authSpinner: {
+    width: 32,
+    height: 32,
+    border: '3px solid rgba(255,255,255,0.2)',
+    borderTopColor: '#fff',
+    borderRadius: '50%',
+    animation: 'spin 0.8s linear infinite',
+  },
+  authContent: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'center',
+    padding: 32,
+  },
+  authHeader: {
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: 8,
+  },
+  authDot: {
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#ff5252',
+    animation: 'pulse-dot 2s ease-in-out infinite',
+  },
+  authTitle: {
+    color: '#fff',
+    fontSize: 48,
+    fontWeight: 700,
+    letterSpacing: -1,
+  },
+  authSubtitle: {
+    color: 'rgba(255,255,255,0.5)',
+    fontSize: 18,
+    marginBottom: 40,
+  },
+  authError: {
+    color: '#ff6b6b',
+    fontSize: 14,
+    marginBottom: 16,
+  },
+  nameInput: {
+    width: '100%',
+    backgroundColor: '#2a2a2a',
+    border: '1px solid #444',
+    borderRadius: 10,
+    padding: '12px 14px',
+    fontSize: 16,
+    color: '#fff',
+    outline: 'none',
+    fontFamily: 'inherit',
+    textAlign: 'center' as any,
+  },
+  nameError: {
+    color: '#ff6b6b',
+    fontSize: 13,
+    marginTop: 8,
+    marginBottom: 0,
+  },
+  authGoogleButton: {
+    backgroundColor: '#fff',
+    color: '#333',
+    border: 'none',
+    borderRadius: 12,
+    padding: '14px 32px',
+    fontSize: 17,
+    fontWeight: 600,
+    cursor: 'pointer',
+    minWidth: 240,
+  },
   container: {
     width: '100%',
     height: '100%',
@@ -618,6 +1145,23 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: 16,
     boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
     overflow: 'hidden',
+  },
+  adminDelete: {
+    position: 'absolute' as any,
+    top: 8,
+    right: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ff4444',
+    color: '#fff',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    fontSize: 12,
+    fontWeight: 700,
+    cursor: 'pointer',
+    zIndex: 1,
   },
   previewContent: {
     display: 'flex',
@@ -805,7 +1349,7 @@ const styles: Record<string, React.CSSProperties> = {
   },
   filterContainer: {
     position: 'absolute',
-    top: 52,
+    top: 62,
     right: 16,
     display: 'flex',
     flexDirection: 'column',
@@ -888,7 +1432,7 @@ const styles: Record<string, React.CSSProperties> = {
     backgroundColor: 'rgba(30, 30, 30, 0.75)',
     borderRadius: 20,
     padding: '8px 14px 8px 10px',
-    pointerEvents: 'none' as any,
+    pointerEvents: 'auto' as any,
   },
   logoDot: {
     width: 10,
@@ -902,6 +1446,270 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: 15,
     fontWeight: 700,
     letterSpacing: 0.5,
+  },
+  signInButton: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 600,
+    cursor: 'pointer',
+    marginLeft: 4,
+    opacity: 0.8,
+  },
+  userAvatar: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    overflow: 'hidden',
+    cursor: 'pointer',
+    marginLeft: 4,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  userAvatarImg: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+  },
+  userAvatarText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: 700,
+  },
+  reportMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1a1a1a',
+    border: '2px solid',
+    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+  },
+  pendingMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ff5252',
+    border: '2px solid #fff',
+    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+    animation: 'pulse-dot 1.5s ease-in-out infinite',
+  },
+  dropPinButton: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    cursor: 'pointer',
+    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
+    zIndex: 2,
+  },
+  dropPinButtonActive: {
+    backgroundColor: '#ff5252',
+  },
+  dropPinText: {
+    color: '#fff',
+    fontSize: 24,
+    fontWeight: 300,
+    lineHeight: '1',
+  },
+  pinDropBanner: {
+    position: 'absolute',
+    top: 60,
+    left: '50%',
+    transform: 'translateX(-50%)',
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
+    color: '#fff',
+    padding: '10px 20px',
+    borderRadius: 20,
+    fontSize: 14,
+    fontWeight: 600,
+    zIndex: 10,
+  },
+  reportForm: {
+    position: 'absolute',
+    bottom: 16,
+    right: 16,
+    width: 320,
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
+    padding: 16,
+    zIndex: 10,
+  },
+  reportFormHeader: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  reportFormTitle: {
+    fontSize: 16,
+    fontWeight: 700,
+    color: '#1a1a1a',
+  },
+  reportFormClose: {
+    cursor: 'pointer',
+    fontSize: 16,
+    color: '#999',
+    padding: '0 4px',
+  },
+  reportCategoryRow: {
+    display: 'flex',
+    flexWrap: 'wrap' as any,
+    gap: 6,
+    marginBottom: 12,
+  },
+  reportCategoryPill: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 4,
+    padding: '6px 10px',
+    borderRadius: 16,
+    cursor: 'pointer',
+    fontSize: 13,
+    fontWeight: 500,
+  },
+  reportInput: {
+    width: '100%',
+    border: '1px solid #e0e0e0',
+    borderRadius: 10,
+    padding: '10px 12px',
+    fontSize: 14,
+    marginBottom: 12,
+    outline: 'none',
+    fontFamily: 'inherit',
+  },
+  reportSubmit: {
+    width: '100%',
+    backgroundColor: '#1a1a1a',
+    color: '#fff',
+    border: 'none',
+    borderRadius: 10,
+    padding: '12px 0',
+    fontSize: 15,
+    fontWeight: 600,
+    cursor: 'pointer',
+  },
+  confirmButton: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: 6,
+    border: 'none',
+    borderRadius: 20,
+    padding: '6px 14px',
+    backgroundColor: '#f0f0f0',
+    cursor: 'pointer',
+    fontSize: 14,
+  },
+  confirmText: {
+    fontSize: 13,
+    fontWeight: 600,
+    color: '#666',
+  },
+  commentsSection: {
+    borderTop: '1px solid #eee',
+  },
+  commentsList: {
+    maxHeight: 180,
+    overflowY: 'auto' as any,
+    padding: '8px 16px',
+  },
+  commentItem: {
+    display: 'flex',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: '6px 0',
+  },
+  commentAvatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    overflow: 'hidden',
+    flexShrink: 0,
+    backgroundColor: '#e0e0e0',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  commentAvatarImg: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+  },
+  commentAvatarText: {
+    fontSize: 11,
+    fontWeight: 700,
+    color: '#666',
+  },
+  commentBody: {
+    flex: 1,
+    minWidth: 0,
+    fontSize: 13,
+    lineHeight: '18px',
+  },
+  commentAuthor: {
+    fontWeight: 600,
+    color: '#1a1a1a',
+    marginRight: 6,
+  },
+  commentText: {
+    color: '#444',
+  },
+  commentTime: {
+    fontSize: 11,
+    color: '#aaa',
+    flexShrink: 0,
+    marginTop: 2,
+  },
+  commentInputRow: {
+    display: 'flex',
+    alignItems: 'center',
+    padding: '8px 12px',
+    gap: 8,
+  },
+  commentInput: {
+    flex: 1,
+    border: '1px solid #e0e0e0',
+    borderRadius: 20,
+    padding: '8px 14px',
+    fontSize: 13,
+    outline: 'none',
+    fontFamily: 'inherit',
+  },
+  commentSend: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: '#1a1a1a',
+    color: '#fff',
+    border: 'none',
+    fontSize: 16,
+    fontWeight: 700,
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  commentSignIn: {
+    padding: '10px 16px',
+    fontSize: 13,
+    color: '#2a7cff',
+    cursor: 'pointer',
+    fontWeight: 500,
+    textAlign: 'center' as any,
   },
   listToggleButton: {
     position: 'absolute',

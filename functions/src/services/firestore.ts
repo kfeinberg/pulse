@@ -79,6 +79,11 @@ export async function writeScrapedEvents(
     const startDate = new Date(event.startTimestamp);
     const endDate = new Date(event.endTimestamp);
 
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
+      console.warn(`Skipped: invalid timestamp for "${event.title}" (start=${event.startTimestamp}, end=${event.endTimestamp})`);
+      continue;
+    }
+
     // Dedup: check for same title + same start time
     const titleTimeQuery = await db
       .collection(EVENTS_COLLECTION)

@@ -154,12 +154,15 @@ export function createDiceScraper(apiKey: string): EventSource {
         const start = new Date(event.startDate!);
         const end = event.endDate ? new Date(event.endDate) : null;
 
-        const formatET = (d: Date) =>
-          d.toLocaleString("en-US", {
+        const formatET = (d: Date) => {
+          const s = d.toLocaleString("en-US", {
             timeZone: "America/New_York",
             year: "numeric", month: "2-digit", day: "2-digit",
             hour: "2-digit", minute: "2-digit", hour12: false,
           });
+          // Some environments produce "24:00" for midnight — normalize to "00:00"
+          return s.replace(/\b24:/, "00:");
+        };
 
         return (
           `Event: ${event.name}\n` +

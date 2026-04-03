@@ -1,11 +1,36 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    match /users/{userId} {
+      allow read: if true;
+      allow create, update: if request.auth != null
+        && request.auth.uid == userId;
+      allow delete: if false;
+    }
+
     match /events/{eventId} {
       allow read: if true;
       allow update: if request.resource.data.diff(resource.data).affectedKeys()
         .hasOnly(['thumbsUp', 'thumbsDown', 'interested']);
-      allow create, delete: if false;
+      allow create: if false;
+      allow delete: if request.auth != null
+        && request.auth.token.email == 'kalli.feinberg@gmail.com';
+
+      match /comments/{commentId} {
+        allow read: if true;
+        allow create: if request.auth != null
+          && request.resource.data.userId == request.auth.uid;
+        allow update, delete: if false;
+      }
+    }
+    match /reports/{reportId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow update: if request.resource.data.diff(resource.data).affectedKeys()
+        .hasOnly(['confirmations']);
+      allow delete: if request.auth != null
+        && request.auth.token.email == 'kalli.feinberg@gmail.com';
     }
   }
 }

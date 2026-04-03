@@ -1,15 +1,26 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
-import { AppEvent } from '@/types';
-import { subscribeToUpcomingEvents, voteOnEvent, markInterested } from '@/services/firebase';
+import { AppEvent, Report, ReportCategory } from '@/types';
+import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport } from '@/services/firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
 import { EventCategory } from '@/types';
+import { useAuth } from '@/contexts/AuthContext';
 
 const WELCOME_KEY = 'pulse_welcomed';
+const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
+
+const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
+  live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
+  free_stuff: { emoji: '🎁', label: 'Free Stuff', color: '#2ecc71' },
+  popup: { emoji: '✨', label: 'Pop-up', color: '#e67e22' },
+  long_line: { emoji: '🚶', label: 'Long Line', color: '#e74c3c' },
+  street_performance: { emoji: '🎭', label: 'Performance', color: '#3498db' },
+  other: { emoji: '📍', label: 'Other', color: '#95a5a6' },
+};
 
 import { MAP_STYLE } from '@/constants/mapStyle';
 import { AdminPasscodeModal } from '@/components/AdminPasscodeModal';
@@ -28,7 +39,6 @@ export default function MapScreen() {
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [showPasscodeModal, setShowPasscodeModal] = useState(false);
-  const [isAdmin, setIsAdmin] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
@@ -49,6 +59,15 @@ export default function MapScreen() {
   );
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
+  const { user, displayName } = useAuth();
+  const [reports, setReports] = useState<Report[]>([]);
+  const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [pinDropMode, setPinDropMode] = useState(false);
+  const [pendingPin, setPendingPin] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [reportText, setReportText] = useState('');
+  const [reportCategory, setReportCategory] = useState<ReportCategory>('other');
+  const [submittingReport, setSubmittingReport] = useState(false);
+  const isAdmin = user?.email === ADMIN_EMAIL;
 
   // Check if user has seen welcome before
   useEffect(() => {
@@ -282,6 +301,11 @@ export default function MapScreen() {
     };
   }, []);
 
+  useEffect(() => {
+    const unsubscribe = subscribeToReports(setReports);
+    return () => unsubscribe();
+  }, []);
+
   // Filter events based on selected timeline time and category
   useEffect(() => {
     const selectedTime = timelineSnaps[timelineIndex].time.getTime();
@@ -299,17 +323,22 @@ export default function MapScreen() {
   }, [allEvents, timelineIndex, timelineSnaps, activeCategories]);
 
   const handleMapPress = useCallback((e: MapPressEvent) => {
-    // Only dismiss if tapping the map itself, not a marker
-    if (e.nativeEvent.action !== 'marker-press') {
-      setSelectedEvent(null);
-      setTimelineOpen(false);
-      setFiltersOpen(false);
-      setShowListView(false);
+    if (e.nativeEvent.action === 'marker-press') return;
+    if (pinDropMode) {
+      setPendingPin(e.nativeEvent.coordinate);
+      setPinDropMode(false);
+      return;
     }
-  }, []);
+    setSelectedEvent(null);
+    setSelectedReport(null);
+    setTimelineOpen(false);
+    setFiltersOpen(false);
+    setShowListView(false);
+  }, [pinDropMode]);
 
   const handleMarkerPress = useCallback(async (event: AppEvent) => {
     setSelectedEvent(event);
+    setSelectedReport(null);
     setFiltersOpen(false);
     try {
       const bounds = await mapRef.current?.getMapBoundaries();
@@ -368,7 +397,6 @@ export default function MapScreen() {
 
   const handlePasscodeSubmit = (code: string) => {
     if (code === ADMIN_PASSCODE) {
-      setIsAdmin(true);
       setShowPasscodeModal(false);
       router.push('/admin');
     } else {
@@ -403,7 +431,7 @@ export default function MapScreen() {
         initialRegion={NYC_REGION}
         customMapStyle={MAP_STYLE}
         showsUserLocation
-        showsMyLocationButton
+        showsMyLocationButton={false}
         onUserLocationChange={(e) => {
           const { latitude, longitude } = e.nativeEvent.coordinate;
           setUserLocation({ latitude, longitude });
@@ -435,6 +463,40 @@ export default function MapScreen() {
             </Marker>
           );
         })}
+        {/* Report markers */}
+        {reports.map((report) => {
+          const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
+          return (
+            <Marker
+              key={`report-${report.id}`}
+              coordinate={{ latitude: report.latitude, longitude: report.longitude }}
+              tracksViewChanges={false}
+              onPress={(e) => {
+                e.stopPropagation();
+                setSelectedReport(report);
+                setSelectedEvent(null);
+              }}
+            >
+              <View style={styles.markerWrapper}>
+                <View style={[styles.reportMarker, { borderColor: cat.color }]}>
+                  <Text style={styles.markerEmoji}>{cat.emoji}</Text>
+                </View>
+                <View style={[styles.markerArrow, { borderTopColor: cat.color }]} />
+              </View>
+            </Marker>
+          );
+        })}
+        {/* Pending pin */}
+        {pendingPin && (
+          <Marker coordinate={pendingPin} tracksViewChanges={false}>
+            <View style={styles.markerWrapper}>
+              <View style={styles.pendingMarker}>
+                <Text style={styles.markerEmoji}>📍</Text>
+              </View>
+              <View style={[styles.markerArrow, { borderTopColor: '#ff5252' }]} />
+            </View>
+          </Marker>
+        )}
       </MapView>
 
       {/* Category filter toggle + pills */}
@@ -676,6 +738,183 @@ export default function MapScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      {/* Selected report card */}
+      {selectedReport && (
+        <View style={styles.previewWrapper}>
+          <View style={styles.previewCard}>
+            {isAdmin && (
+              <TouchableOpacity
+                style={styles.adminDeleteBtn}
+                onPress={() => {
+                  Alert.alert('Delete Report', 'Delete this report?', [
+                    { text: 'Cancel', style: 'cancel' },
+                    { text: 'Delete', style: 'destructive', onPress: () => {
+                      deleteReport(selectedReport.id);
+                      setSelectedReport(null);
+                    }},
+                  ]);
+                }}
+              >
+                <Text style={styles.adminDeleteText}>✕</Text>
+              </TouchableOpacity>
+            )}
+            <View style={styles.previewContent}>
+              <Text style={styles.previewEmoji}>
+                {REPORT_CATEGORIES[selectedReport.category]?.emoji || '📍'}
+              </Text>
+              <View style={styles.previewText}>
+                <Text style={styles.previewTitle} numberOfLines={2}>
+                  {selectedReport.text}
+                </Text>
+                <Text style={styles.previewTime}>
+                  {selectedReport.userName} · {(() => {
+                    const mins = Math.floor((Date.now() - selectedReport.createdAt.toMillis()) / 60000);
+                    if (mins < 1) return 'just now';
+                    if (mins < 60) return `${mins}m ago`;
+                    return `${Math.floor(mins / 60)}h ago`;
+                  })()}
+                </Text>
+              </View>
+            </View>
+            <TouchableOpacity
+              style={styles.confirmBtn}
+              onPress={() => {
+                confirmReport(selectedReport.id);
+                setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.confirmBtnEmoji}>👍</Text>
+              <Text style={styles.confirmBtnText}>
+                {selectedReport.confirmations > 0
+                  ? `${selectedReport.confirmations} confirmed`
+                  : 'Still happening'}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* Admin delete on selected event */}
+      {isAdmin && selectedEvent && (
+        <TouchableOpacity
+          style={styles.adminDeleteFloat}
+          onPress={() => {
+            Alert.alert('Delete Event', `Delete "${selectedEvent.title}"?`, [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Delete', style: 'destructive', onPress: () => {
+                deleteEvent(selectedEvent.id);
+                setSelectedEvent(null);
+              }},
+            ]);
+          }}
+        >
+          <Text style={styles.adminDeleteFloatText}>Delete</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Drop pin button */}
+      <TouchableOpacity
+        style={[styles.dropPinButton, pinDropMode && styles.dropPinButtonActive]}
+        onPress={() => {
+          if (!user) {
+            router.push('/sign-in');
+            return;
+          }
+          setPinDropMode((v) => !v);
+          setPendingPin(null);
+        }}
+        activeOpacity={0.8}
+      >
+        <Text style={styles.dropPinText}>+</Text>
+      </TouchableOpacity>
+
+      {/* Sign-in button */}
+      {!user && (
+        <TouchableOpacity
+          style={styles.signInFloat}
+          onPress={() => router.push('/sign-in')}
+          activeOpacity={0.8}
+        >
+          <Text style={styles.signInFloatText}>Sign in</Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Pin drop mode banner */}
+      {pinDropMode && (
+        <View style={styles.pinDropBanner}>
+          <Text style={styles.pinDropBannerText}>Tap the map to drop a pin</Text>
+        </View>
+      )}
+
+      {/* Report form modal */}
+      <Modal visible={!!pendingPin} transparent animationType="slide">
+        <View style={styles.modalBackdrop}>
+          <View style={styles.reportForm}>
+            <View style={styles.reportFormHeader}>
+              <Text style={styles.reportFormTitle}>What's happening here?</Text>
+              <TouchableOpacity onPress={() => { setPendingPin(null); setReportText(''); setReportCategory('other'); }}>
+                <Text style={styles.reportFormClose}>✕</Text>
+              </TouchableOpacity>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.reportCatScroll}>
+              {(Object.keys(REPORT_CATEGORIES) as ReportCategory[]).map((key) => {
+                const cat = REPORT_CATEGORIES[key];
+                const active = reportCategory === key;
+                return (
+                  <TouchableOpacity
+                    key={key}
+                    style={[styles.reportCatPill, { backgroundColor: active ? cat.color : '#f0f0f0' }]}
+                    onPress={() => setReportCategory(key)}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={styles.reportCatEmoji}>{cat.emoji}</Text>
+                    <Text style={[styles.reportCatLabel, active && { color: '#fff' }]}>{cat.label}</Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </ScrollView>
+            <TextInput
+              style={styles.reportInput}
+              placeholder="Add a note (optional)"
+              placeholderTextColor="#999"
+              value={reportText}
+              onChangeText={setReportText}
+              maxLength={140}
+            />
+            <TouchableOpacity
+              style={[styles.reportSubmit, submittingReport && { opacity: 0.6 }]}
+              disabled={submittingReport}
+              onPress={async () => {
+                if (!user || !pendingPin) return;
+                setSubmittingReport(true);
+                try {
+                  await createReport({
+                    text: reportText || REPORT_CATEGORIES[reportCategory].label,
+                    category: reportCategory,
+                    latitude: pendingPin.latitude,
+                    longitude: pendingPin.longitude,
+                    userId: user.uid,
+                    userName: displayName || user.displayName || 'Anonymous',
+                    userPhoto: user.photoURL || undefined,
+                  });
+                  setPendingPin(null);
+                  setReportText('');
+                  setReportCategory('other');
+                } catch (err) {
+                  Alert.alert('Error', 'Failed to drop pin');
+                } finally {
+                  setSubmittingReport(false);
+                }
+              }}
+              activeOpacity={0.8}
+            >
+              <Text style={styles.reportSubmitText}>{submittingReport ? 'Posting...' : 'Drop Pin'}</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
 
       <AdminPasscodeModal
         visible={showPasscodeModal}
@@ -1238,6 +1477,207 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     letterSpacing: 0.3,
+  },
+  reportMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#1a1a1a',
+    borderWidth: 2,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 5,
+  },
+  pendingMarker: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#ff5252',
+    borderWidth: 2,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 3,
+    elevation: 5,
+  },
+  confirmBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: '#f0f0f0',
+    borderRadius: 20,
+    paddingVertical: 6,
+    paddingHorizontal: 14,
+    marginHorizontal: 16,
+    marginBottom: 12,
+    alignSelf: 'flex-start',
+  },
+  confirmBtnEmoji: {
+    fontSize: 14,
+  },
+  confirmBtnText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#666',
+  },
+  adminDeleteBtn: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#ff4444',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 1,
+  },
+  adminDeleteText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '700',
+  },
+  adminDeleteFloat: {
+    position: 'absolute',
+    top: 60,
+    left: 16,
+    backgroundColor: '#ff4444',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    zIndex: 10,
+  },
+  adminDeleteFloatText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  dropPinButton: {
+    position: 'absolute',
+    bottom: 40,
+    right: 20,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+  },
+  dropPinButtonActive: {
+    backgroundColor: '#ff5252',
+  },
+  dropPinText: {
+    color: '#fff',
+    fontSize: 28,
+    fontWeight: '300',
+    marginTop: -2,
+  },
+  signInFloat: {
+    position: 'absolute',
+    top: 60,
+    left: 16,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+  },
+  signInFloatText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  pinDropBanner: {
+    position: 'absolute',
+    top: 60,
+    alignSelf: 'center',
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+  },
+  pinDropBannerText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  modalBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'flex-end',
+  },
+  reportForm: {
+    backgroundColor: '#fff',
+    borderTopLeftRadius: 20,
+    borderTopRightRadius: 20,
+    padding: 20,
+    paddingBottom: 40,
+  },
+  reportFormHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  reportFormTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a1a1a',
+  },
+  reportFormClose: {
+    fontSize: 18,
+    color: '#999',
+    padding: 4,
+  },
+  reportCatScroll: {
+    marginBottom: 12,
+  },
+  reportCatPill: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    marginRight: 8,
+  },
+  reportCatEmoji: {
+    fontSize: 14,
+  },
+  reportCatLabel: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: '#333',
+  },
+  reportInput: {
+    borderWidth: 1,
+    borderColor: '#e0e0e0',
+    borderRadius: 12,
+    padding: 12,
+    fontSize: 15,
+    marginBottom: 12,
+  },
+  reportSubmit: {
+    backgroundColor: '#1a1a1a',
+    borderRadius: 12,
+    paddingVertical: 14,
+    alignItems: 'center',
+  },
+  reportSubmitText: {
+    color: '#fff',
+    fontSize: 16,
+    fontWeight: '600',
   },
   splash: {
     ...StyleSheet.absoluteFillObject,

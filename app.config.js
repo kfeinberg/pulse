@@ -1,6 +1,6 @@
 export default {
   expo: {
-    name: "NYC Happenings",
+    name: "Pulse",
     slug: "nyc-happenings",
     version: "1.0.0",
     orientation: "portrait",
@@ -14,13 +14,22 @@ export default {
       config: {
         googleMapsApiKey: process.env.EXPO_PUBLIC_GOOGLE_MAPS_API_KEY,
       },
+      usesAppleSignIn: true,
       infoPlist: {
         NSLocationWhenInUseUsageDescription:
           "This app uses your location to show nearby events on the map.",
         ITSAppUsesNonExemptEncryption: false,
+        CFBundleURLTypes: [
+          {
+            CFBundleURLSchemes: [
+              "com.googleusercontent.apps.499823552737-erf8dj2janoieuipmg04kqbji5bdg4r0",
+            ],
+          },
+        ],
       },
     },
     android: {
+      package: "com.kfeinberg.pulse",
       adaptiveIcon: {
         backgroundColor: "#E6F4FE",
         foregroundImage: "./assets/images/android-icon-foreground.png",
@@ -48,6 +57,8 @@ export default {
           },
         },
       ],
+      "expo-apple-authentication",
+      "@react-native-google-signin/google-signin",
       "@react-native-community/datetimepicker",
     ],
     experiments: {

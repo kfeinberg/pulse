@@ -212,16 +212,36 @@ async function sendToClaude(
 
   return resolvedEvents.map((e) => {
     const dateStr = e.date || new Date().toISOString().split("T")[0];
-    const startTimeStr = e.startTime || "12:00";
-    const endTimeStr = e.endTime || "23:59";
+    // Normalize time strings: handle "24:00" -> "00:00", ensure HH:MM format
+    const normalizeTime = (t: string, fallback: string): string => {
+      if (!t) return fallback;
+      const cleaned = t.replace(/^24:/, "00:");
+      // Ensure it matches HH:MM
+      if (/^\d{1,2}:\d{2}$/.test(cleaned)) {
+        const [h, m] = cleaned.split(":");
+        return `${h.padStart(2, "0")}:${m}`;
+      }
+      return fallback;
+    };
+    const startTimeStr = normalizeTime(e.startTime, "12:00");
+    const endTimeStr = normalizeTime(e.endTime, "23:59");
     // Determine if date is in EDT (Mar-Nov) or EST (Nov-Mar)
     const testDate = new Date(`${dateStr}T12:00:00Z`);
     const month = testDate.getUTCMonth(); // 0-indexed
     const isDST = month >= 2 && month <= 10; // rough EDT: Mar–Oct
     const tzOffset = isDST ? "-04:00" : "-05:00";
     // Parse times as Eastern Time
-    const startTimestamp = new Date(`${dateStr}T${startTimeStr}:00${tzOffset}`).getTime();
+    let startTimestamp = new Date(`${dateStr}T${startTimeStr}:00${tzOffset}`).getTime();
     let endTimestamp = new Date(`${dateStr}T${endTimeStr}:00${tzOffset}`).getTime();
+    // Guard against NaN timestamps
+    if (isNaN(startTimestamp)) {
+      console.warn(`Invalid start timestamp for "${e.title}": date=${dateStr} time=${e.startTime}, using noon`);
+      startTimestamp = new Date(`${dateStr}T12:00:00${tzOffset}`).getTime();
+    }
+    if (isNaN(endTimestamp)) {
+      console.warn(`Invalid end timestamp for "${e.title}": date=${dateStr} time=${e.endTime}, using 23:59`);
+      endTimestamp = new Date(`${dateStr}T23:59:00${tzOffset}`).getTime();
+    }
     // If end time is before start time, the event crosses midnight — bump end to next day
     if (endTimestamp <= startTimestamp) {
       const nextDay = new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000).toISOString().split("T")[0];
