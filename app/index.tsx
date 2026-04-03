@@ -9,6 +9,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
 import { EventCategory } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
+import { signOut } from '@/services/auth';
 
 const WELCOME_KEY = 'pulse_welcomed';
 const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
@@ -797,7 +798,7 @@ export default function MapScreen() {
       )}
 
       {/* Admin delete on selected event */}
-      {isAdmin && selectedEvent && (
+      {isAdmin && selectedEvent && !selectedEvent.sourceUrl && (
         <TouchableOpacity
           style={styles.adminDeleteFloat}
           onPress={() => {
@@ -830,15 +831,36 @@ export default function MapScreen() {
         <Text style={styles.dropPinText}>+</Text>
       </TouchableOpacity>
 
-      {/* Sign-in button */}
-      {!user && (
-        <TouchableOpacity
-          style={styles.signInFloat}
-          onPress={() => router.push('/sign-in')}
-          activeOpacity={0.8}
-        >
-          <Text style={styles.signInFloatText}>Sign in</Text>
-        </TouchableOpacity>
+      {/* Profile / Sign-in button */}
+      {!selectedEvent && !selectedReport && (
+        user ? (
+          <TouchableOpacity
+            style={styles.profileFloat}
+            onPress={() => {
+              Alert.alert(displayName || 'Account', user.email || '', [
+                { text: 'Cancel', style: 'cancel' },
+                { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
+              ]);
+            }}
+            activeOpacity={0.8}
+          >
+            {user.photoURL ? (
+              <Image source={{ uri: user.photoURL }} style={styles.profileImage} />
+            ) : (
+              <Text style={styles.profileInitial}>
+                {(displayName || user.email || '?')[0].toUpperCase()}
+              </Text>
+            )}
+          </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            style={styles.signInFloat}
+            onPress={() => router.push('/sign-in')}
+            activeOpacity={0.8}
+          >
+            <Text style={styles.signInFloatText}>Sign in</Text>
+          </TouchableOpacity>
+        )
       )}
 
       {/* Pin drop mode banner */}
@@ -1583,6 +1605,35 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: '300',
     marginTop: -2,
+  },
+  profileFloat: {
+    position: 'absolute',
+    top: 60,
+    left: 16,
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.3,
+    shadowRadius: 4,
+    elevation: 5,
+    overflow: 'hidden',
+    borderWidth: 2,
+    borderColor: '#000',
+  },
+  profileImage: {
+    width: 50,
+    height: 50,
+    borderRadius: 25,
+  },
+  profileInitial: {
+    color: '#fff',
+    fontSize: 18,
+    fontWeight: '700',
   },
   signInFloat: {
     position: 'absolute',
