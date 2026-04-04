@@ -688,7 +688,7 @@ export default function MapScreen() {
         onPress={() => setShowListView((v) => !v)}
         activeOpacity={0.8}
       >
-        <Text style={styles.listToggleText}>{showListView ? '🗺' : '☰'}</Text>
+        <Text style={styles.listToggleText}>{showListView ? '◉' : '▤'}</Text>
       </TouchableOpacity>
 
       {showListView && (
@@ -839,39 +839,29 @@ export default function MapScreen() {
         }}
         activeOpacity={0.8}
       >
-        <Text style={styles.dropPinText}>+</Text>
+        <Text style={styles.dropPinText}>📍</Text>
       </TouchableOpacity>
 
-      {/* Profile / Sign-in button */}
-      {!selectedEvent && !selectedReport && (
-        user ? (
-          <TouchableOpacity
-            style={styles.profileFloat}
-            onPress={() => {
-              Alert.alert(displayName || 'Account', user.email || '', [
-                { text: 'Cancel', style: 'cancel' },
-                { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
-              ]);
-            }}
-            activeOpacity={0.8}
-          >
-            {user.photoURL ? (
-              <Image source={{ uri: user.photoURL }} style={styles.profileImage} />
-            ) : (
-              <Text style={styles.profileInitial}>
-                {(displayName || user.email || '?')[0].toUpperCase()}
-              </Text>
-            )}
-          </TouchableOpacity>
-        ) : (
-          <TouchableOpacity
-            style={styles.signInFloat}
-            onPress={() => router.push('/sign-in')}
-            activeOpacity={0.8}
-          >
-            <Text style={styles.signInFloatText}>Sign in</Text>
-          </TouchableOpacity>
-        )
+      {/* Profile button */}
+      {user && !selectedEvent && !selectedReport && (
+        <TouchableOpacity
+          style={styles.profileFloat}
+          onPress={() => {
+            Alert.alert(displayName || 'Account', user.email || '', [
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
+            ]);
+          }}
+          activeOpacity={0.8}
+        >
+          {user.photoURL ? (
+            <Image source={{ uri: user.photoURL }} style={styles.profileImage} />
+          ) : (
+            <Text style={styles.profileInitial}>
+              {(displayName || user.email || '?')[0].toUpperCase()}
+            </Text>
+          )}
+        </TouchableOpacity>
       )}
 
       {/* Pin drop mode banner */}
@@ -1612,18 +1602,15 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff5252',
   },
   dropPinText: {
-    color: '#fff',
-    fontSize: 28,
-    fontWeight: '300',
-    marginTop: -2,
+    fontSize: 22,
   },
   profileFloat: {
     position: 'absolute',
     top: 60,
     left: 16,
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: 'rgba(30, 30, 30, 0.85)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1637,13 +1624,13 @@ const styles = StyleSheet.create({
     borderColor: '#000',
   },
   profileImage: {
-    width: 50,
-    height: 50,
-    borderRadius: 25,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   profileInitial: {
     color: '#fff',
-    fontSize: 18,
+    fontSize: 15,
     fontWeight: '700',
   },
   signInFloat: {
