@@ -181,7 +181,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     const newVote: VoteType = previousVote === voteType ? null : voteType;
 
     // Optimistic local update
-    setEvents((prev) => prev.map((e) => {
+    const applyVoteUpdate = (e: AppEvent): AppEvent => {
       if (e.id !== event.id) return e;
       const updated = { ...e };
       if (previousVote === voteType) {
@@ -194,18 +194,30 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         if (previousVote === 'down') updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
       }
       return updated;
-    }));
+    };
+    setAllEvents((prev) => prev.map(applyVoteUpdate));
+    setEvents((prev) => prev.map(applyVoteUpdate));
 
     setVotes((prev) => ({ ...prev, [event.id]: newVote }));
     setVote(event.id, newVote);
 
     setSelectedEvent((prev) => {
       if (!prev || prev.id !== event.id) return prev;
-      return events.find((e) => e.id === event.id) ?? prev;
+      const updated = { ...prev };
+      if (previousVote === voteType) {
+        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
+        else updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
+      } else {
+        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) + 1;
+        else updated.thumbsDown = (updated.thumbsDown ?? 0) + 1;
+        if (previousVote === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
+        if (previousVote === 'down') updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
+      }
+      return updated;
     });
 
     voteOnEvent(event.id, voteType, previousVote).catch(console.warn);
-  }, [votes, events]);
+  }, [votes]);
 
   const handleInterested = useCallback((event: AppEvent) => {
     const wasInterested = !!interestedMap[event.id];
@@ -685,7 +697,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                         text,
                         userId: user.uid,
                         userName: displayName || user.displayName || 'Anonymous',
-                        userPhoto: user.photoURL || undefined,
+                        ...(user.photoURL ? { userPhoto: user.photoURL } : {}),
                       }).finally(() => setSubmittingComment(false));
                     }
                   }}
@@ -705,7 +717,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                       text,
                       userId: user.uid,
                       userName: displayName || user.displayName || 'Anonymous',
-                      userPhoto: user.photoURL || undefined,
+                      ...(user.photoURL ? { userPhoto: user.photoURL } : {}),
                     }).finally(() => setSubmittingComment(false));
                   }}
                 >
@@ -855,7 +867,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   longitude: pendingPin.lng,
                   userId: user.uid,
                   userName: displayName || user.displayName || 'Anonymous',
-                  userPhoto: user.photoURL || undefined,
+                  ...(user.photoURL ? { userPhoto: user.photoURL } : {}),
                 });
                 setPendingPin(null);
                 setReportText('');

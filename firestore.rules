@@ -15,13 +15,13 @@ service cloud.firestore {
     match /events/{eventId} {
       allow read: if true;
       allow update: if request.resource.data.diff(resource.data).affectedKeys()
-        .hasOnly(['thumbsUp', 'thumbsDown', 'interested'])
-        && request.resource.data.thumbsUp is int
-        && request.resource.data.thumbsDown is int
-        && request.resource.data.interested is int
-        && request.resource.data.thumbsUp >= 0
-        && request.resource.data.thumbsDown >= 0
-        && request.resource.data.interested >= 0;
+        .hasOnly(['thumbsUp', 'thumbsDown', 'interested', 'sourceUrls'])
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['thumbsUp'])
+            || (request.resource.data.thumbsUp is int && request.resource.data.thumbsUp >= 0))
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['thumbsDown'])
+            || (request.resource.data.thumbsDown is int && request.resource.data.thumbsDown >= 0))
+        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['interested'])
+            || (request.resource.data.interested is int && request.resource.data.interested >= 0));
       allow create: if false;
       allow delete: if request.auth != null
         && request.auth.token.email == 'kalli.feinberg@gmail.com';
