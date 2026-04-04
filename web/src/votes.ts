@@ -40,3 +40,24 @@ export function setInterested(eventId: string, interested: boolean): void {
   }
   localStorage.setItem(INTERESTED_KEY, JSON.stringify(all));
 }
+
+const CONFIRMED_KEY = 'report_confirmed';
+
+export function getConfirmedReports(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(CONFIRMED_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function setConfirmed(reportId: string, confirmed: boolean): void {
+  const all = getConfirmedReports();
+  if (confirmed) {
+    all[reportId] = true;
+  } else {
+    delete all[reportId];
+  }
+  localStorage.setItem(CONFIRMED_KEY, JSON.stringify(all));
+}

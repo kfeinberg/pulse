@@ -1,7 +1,7 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, signInWithGoogle, signOut, onAuthChange, User, createReport, subscribeToReports, confirmReport, addComment, subscribeToComments, deleteEvent, deleteReport, getUserProfile, isDisplayNameTaken, setUserProfile } from './firebase';
-import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, VoteType } from './votes';
+import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, VoteType } from './votes';
 import { CATEGORIES } from './categories';
 import { MAP_STYLE } from './mapStyle';
 import { AppEvent, EventCategory, Comment, Report, ReportCategory } from './types';
@@ -169,6 +169,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [comments, setComments] = useState<Comment[]>([]);
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
+  const [confirmedMap, setConfirmedMap] = useState<Record<string, boolean>>({});
   const trackRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
 
@@ -176,6 +177,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   useEffect(() => {
     setVotes(getAllVotes());
     setInterestedMap(getInterestedEvents());
+    setConfirmedMap(getConfirmedReports());
   }, []);
 
   // Get user location
@@ -930,15 +932,24 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           </div>
           <div style={styles.cardActions}>
             <button
-              style={styles.confirmButton}
+              style={{
+                ...styles.confirmButton,
+                ...(confirmedMap[selectedReport.id] ? styles.confirmButtonActive : {}),
+              }}
               onClick={(e) => {
                 e.stopPropagation();
+                if (confirmedMap[selectedReport.id]) return;
                 confirmReport(selectedReport.id);
                 setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+                setConfirmedMap((prev) => ({ ...prev, [selectedReport.id]: true }));
+                setConfirmedLocal(selectedReport.id, true);
               }}
             >
               <span>👍</span>
-              <span style={styles.confirmText}>
+              <span style={{
+                ...styles.confirmText,
+                ...(confirmedMap[selectedReport.id] ? styles.confirmTextActive : {}),
+              }}>
                 {selectedReport.confirmations > 0
                   ? `${selectedReport.confirmations} confirmed`
                   : 'Still happening'}
@@ -1652,10 +1663,16 @@ const styles: Record<string, React.CSSProperties> = {
     cursor: 'pointer',
     fontSize: 14,
   },
+  confirmButtonActive: {
+    backgroundColor: '#2a7cff',
+  },
   confirmText: {
     fontSize: 13,
     fontWeight: 600,
     color: '#666',
+  },
+  confirmTextActive: {
+    color: '#fff',
   },
   commentsSection: {
     borderTop: '1px solid #eee',
