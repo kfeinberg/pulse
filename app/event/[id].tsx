@@ -45,12 +45,22 @@ export default function EventDetailScreen() {
   }, [id]);
 
   const formatTime = (date: Date) => {
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    const now = new Date();
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const tomorrow = new Date(today.getTime() + 86400000);
+    const eventDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+
     const h = date.getHours();
     const hour = h % 12 || 12;
     const ampm = h < 12 ? 'AM' : 'PM';
     const min = date.getMinutes().toString().padStart(2, '0');
-    return `${months[date.getMonth()]} ${date.getDate()}, ${hour}:${min} ${ampm}`;
+    const time = `${hour}:${min} ${ampm}`;
+
+    if (eventDay.getTime() === today.getTime()) return `Today, ${time}`;
+    if (eventDay.getTime() === tomorrow.getTime()) return `Tomorrow, ${time}`;
+
+    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+    return `${months[date.getMonth()]} ${date.getDate()}, ${time}`;
   };
 
   const handleSendComment = async () => {

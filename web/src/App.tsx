@@ -19,13 +19,23 @@ const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
 const WELCOME_KEY = 'pulse_welcomed';
 
 function formatTime(millis: number) {
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
   const d = new Date(millis);
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const tomorrow = new Date(today.getTime() + 86400000);
+  const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+
   const h = d.getHours();
   const hour = h % 12 || 12;
   const ampm = h < 12 ? 'AM' : 'PM';
   const min = d.getMinutes().toString().padStart(2, '0');
-  return `${months[d.getMonth()]} ${d.getDate()}, ${hour}:${min} ${ampm}`;
+  const time = `${hour}:${min} ${ampm}`;
+
+  if (eventDay.getTime() === today.getTime()) return `Today, ${time}`;
+  if (eventDay.getTime() === tomorrow.getTime()) return `Tomorrow, ${time}`;
+
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${months[d.getMonth()]} ${d.getDate()}, ${time}`;
 }
 
 function getDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
