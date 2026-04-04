@@ -523,7 +523,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       {/* Event preview card */}
       {selectedEvent && (
         <div style={styles.previewCard}>
-          {user?.email === 'kalli.feinberg@gmail.com' && !selectedEvent.sourceUrl && (
+          {user?.email === 'kalli.feinberg@gmail.com' && !selectedEvent.sourceUrl && !(selectedEvent.sourceUrls?.length) && (
             <div
               style={styles.adminDelete}
               onClick={(e) => {
@@ -559,21 +559,33 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           {selectedEvent.description && (
             <div style={styles.previewDescription}>{selectedEvent.description}</div>
           )}
-          {selectedEvent.sourceUrl && (
-            <a
-              href={selectedEvent.sourceUrl}
-              target="_blank"
-              rel="noopener noreferrer"
-              style={styles.sourceLink}
-              onClick={(e) => e.stopPropagation()}
-            >
-              {(() => {
-                try { return new URL(selectedEvent.sourceUrl).hostname.replace('www.', ''); }
-                catch { return selectedEvent.sourceUrl; }
-              })()}
-              {' '}→
-            </a>
-          )}
+          {(() => {
+            const urls = selectedEvent.sourceUrls?.length
+              ? selectedEvent.sourceUrls
+              : selectedEvent.sourceUrl
+                ? [selectedEvent.sourceUrl]
+                : [];
+            return urls.length > 0 ? (
+              <div style={styles.sourceLinks}>
+                {urls.map((url, i) => (
+                  <a
+                    key={i}
+                    href={url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={styles.sourceLink}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {(() => {
+                      try { return new URL(url).hostname.replace('www.', ''); }
+                      catch { return url; }
+                    })()}
+                    {' '}→
+                  </a>
+                ))}
+              </div>
+            ) : null;
+          })()}
           {selectedEvent.startTime.toMillis() > Date.now() ? (
             <div style={styles.cardActions}>
               <button
@@ -1202,9 +1214,14 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#2a7cff',
     fontWeight: 600,
   },
+  sourceLinks: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 4,
+    padding: '0 16px 12px',
+  },
   sourceLink: {
     display: 'block',
-    padding: '0 16px 12px',
     fontSize: 13,
     fontWeight: 600,
     color: '#2a7cff',

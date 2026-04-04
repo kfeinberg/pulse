@@ -46,6 +46,7 @@ export interface AppEvent {
   endTime: Timestamp;
   createdAt: Timestamp;
   sourceUrl?: string;
+  sourceUrls?: string[];
   thumbsUp?: number;
   thumbsDown?: number;
   interested?: number;

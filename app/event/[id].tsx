@@ -9,7 +9,7 @@ import { subscribeToComments, addComment, deleteEvent } from '@/services/firebas
 const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 
 export default function EventDetailScreen() {
-  const { id, title, category, description, startTime, endTime, sourceUrl } = useLocalSearchParams<{
+  const { id, title, category, description, startTime, endTime, sourceUrl, sourceUrls } = useLocalSearchParams<{
     id: string;
     title: string;
     category: EventCategory;
@@ -17,7 +17,16 @@ export default function EventDetailScreen() {
     startTime: string;
     endTime: string;
     sourceUrl: string;
+    sourceUrls: string;
   }>();
+
+  const urls: string[] = (() => {
+    if (sourceUrls) {
+      try { return JSON.parse(sourceUrls); } catch {}
+    }
+    if (sourceUrl) return [sourceUrl];
+    return [];
+  })();
 
   const { user, displayName } = useAuth();
   const router = useRouter();
@@ -89,7 +98,7 @@ export default function EventDetailScreen() {
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
         <View style={styles.header}>
-          {isAdmin && !sourceUrl && (
+          {isAdmin && urls.length === 0 && (
             <TouchableOpacity style={styles.deleteButton} onPress={handleDelete}>
               <Text style={styles.deleteText}>Delete</Text>
             </TouchableOpacity>
@@ -110,19 +119,24 @@ export default function EventDetailScreen() {
             <Text style={styles.description}>{description}</Text>
           </View>
         ) : null}
-        {sourceUrl ? (
-          <TouchableOpacity
-            style={styles.sourceLink}
-            onPress={() => Linking.openURL(sourceUrl)}
-            activeOpacity={0.7}
-          >
-            <Text style={styles.sourceLinkText}>
-              {(() => {
-                try { return new URL(sourceUrl).hostname.replace('www.', ''); }
-                catch { return sourceUrl; }
-              })()}{' '}→
-            </Text>
-          </TouchableOpacity>
+        {urls.length > 0 ? (
+          <View style={styles.sourceLinks}>
+            {urls.map((url, i) => (
+              <TouchableOpacity
+                key={i}
+                style={styles.sourceLink}
+                onPress={() => Linking.openURL(url)}
+                activeOpacity={0.7}
+              >
+                <Text style={styles.sourceLinkText}>
+                  {(() => {
+                    try { return new URL(url).hostname.replace('www.', ''); }
+                    catch { return url; }
+                  })()}{' '}→
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
         ) : null}
 
         {/* Comments */}
@@ -249,9 +263,12 @@ const styles = StyleSheet.create({
     lineHeight: 24,
     color: '#444',
   },
+  sourceLinks: {
+    paddingHorizontal: 24,
+    paddingTop: 16,
+    gap: 8,
+  },
   sourceLink: {
-    marginHorizontal: 24,
-    marginTop: 20,
     alignItems: 'center',
   },
   sourceLinkText: {

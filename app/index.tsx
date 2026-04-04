@@ -375,6 +375,7 @@ export default function MapScreen() {
         startTime: selectedEvent.startTime.toMillis().toString(),
         endTime: selectedEvent.endTime.toMillis().toString(),
         sourceUrl: selectedEvent.sourceUrl ?? '',
+        sourceUrls: JSON.stringify(selectedEvent.sourceUrls ?? (selectedEvent.sourceUrl ? [selectedEvent.sourceUrl] : [])),
       },
     });
   }, [selectedEvent, router]);
@@ -798,7 +799,7 @@ export default function MapScreen() {
       )}
 
       {/* Admin delete on selected event */}
-      {isAdmin && selectedEvent && !selectedEvent.sourceUrl && (
+      {isAdmin && selectedEvent && !selectedEvent.sourceUrl && !(selectedEvent.sourceUrls?.length) && (
         <TouchableOpacity
           style={styles.adminDeleteFloat}
           onPress={() => {
