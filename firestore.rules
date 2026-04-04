@@ -4,14 +4,24 @@ service cloud.firestore {
     match /users/{userId} {
       allow read: if true;
       allow create, update: if request.auth != null
-        && request.auth.uid == userId;
+        && request.auth.uid == userId
+        && request.resource.data.keys().hasAll(['uid', 'displayName', 'createdAt'])
+        && request.resource.data.displayName is string
+        && request.resource.data.displayName.size() >= 2
+        && request.resource.data.displayName.size() <= 20;
       allow delete: if false;
     }
 
     match /events/{eventId} {
       allow read: if true;
       allow update: if request.resource.data.diff(resource.data).affectedKeys()
-        .hasOnly(['thumbsUp', 'thumbsDown', 'interested']);
+        .hasOnly(['thumbsUp', 'thumbsDown', 'interested'])
+        && request.resource.data.thumbsUp is int
+        && request.resource.data.thumbsDown is int
+        && request.resource.data.interested is int
+        && request.resource.data.thumbsUp >= 0
+        && request.resource.data.thumbsDown >= 0
+        && request.resource.data.interested >= 0;
       allow create: if false;
       allow delete: if request.auth != null
         && request.auth.token.email == 'kalli.feinberg@gmail.com';
@@ -19,16 +29,27 @@ service cloud.firestore {
       match /comments/{commentId} {
         allow read: if true;
         allow create: if request.auth != null
-          && request.resource.data.userId == request.auth.uid;
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.keys().hasAll(['text', 'userId', 'userName', 'createdAt'])
+          && request.resource.data.text is string
+          && request.resource.data.text.size() > 0
+          && request.resource.data.text.size() <= 280;
         allow update, delete: if false;
       }
     }
+
     match /reports/{reportId} {
       allow read: if true;
       allow create: if request.auth != null
-        && request.resource.data.userId == request.auth.uid;
+        && request.resource.data.userId == request.auth.uid
+        && request.resource.data.keys().hasAll(['text', 'category', 'latitude', 'longitude', 'userId', 'userName', 'createdAt', 'expiresAt', 'confirmations'])
+        && request.resource.data.text is string
+        && request.resource.data.text.size() <= 140
+        && request.resource.data.confirmations == 0;
       allow update: if request.resource.data.diff(resource.data).affectedKeys()
-        .hasOnly(['confirmations']);
+        .hasOnly(['confirmations'])
+        && request.resource.data.confirmations is int
+        && request.resource.data.confirmations == resource.data.confirmations + 1;
       allow delete: if request.auth != null
         && request.auth.token.email == 'kalli.feinberg@gmail.com';
     }
