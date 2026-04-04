@@ -4,7 +4,7 @@ import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-ma
 import { useRouter } from 'expo-router';
 import { AppEvent, Report, ReportCategory } from '@/types';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport } from '@/services/firebase';
-import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, VoteType } from '@/services/votes';
+import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
 import { EventCategory } from '@/types';
@@ -63,6 +63,7 @@ export default function MapScreen() {
   const { user, displayName } = useAuth();
   const [reports, setReports] = useState<Report[]>([]);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+  const [confirmedMap, setConfirmedMap] = useState<Record<string, boolean>>({});
   const [pinDropMode, setPinDropMode] = useState(false);
   const [pendingPin, setPendingPin] = useState<{ latitude: number; longitude: number } | null>(null);
   const [reportText, setReportText] = useState('');
@@ -208,6 +209,7 @@ export default function MapScreen() {
   useEffect(() => {
     getAllVotes().then(setVotes).catch(() => {});
     getInterestedEvents().then(setInterestedMap).catch(() => {});
+    getConfirmedReports().then(setConfirmedMap).catch(() => {});
   }, []);
 
   const handleVote = useCallback(async (event: AppEvent, voteType: 'up' | 'down') => {
@@ -688,7 +690,7 @@ export default function MapScreen() {
         onPress={() => setShowListView((v) => !v)}
         activeOpacity={0.8}
       >
-        <Text style={styles.listToggleText}>{showListView ? '◉' : '▤'}</Text>
+        <Text style={styles.listToggleText}>{showListView ? '◉' : '☰'}</Text>
       </TouchableOpacity>
 
       {showListView && (
@@ -790,15 +792,25 @@ export default function MapScreen() {
               </View>
             </View>
             <TouchableOpacity
-              style={styles.confirmBtn}
+              style={[styles.confirmBtn, confirmedMap[selectedReport.id] && styles.confirmBtnActive]}
               onPress={() => {
-                confirmReport(selectedReport.id);
-                setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+                const alreadyConfirmed = confirmedMap[selectedReport.id];
+                if (alreadyConfirmed) {
+                  confirmReport(selectedReport.id, -1);
+                  setSelectedReport({ ...selectedReport, confirmations: Math.max(0, selectedReport.confirmations - 1) });
+                  setConfirmedMap((prev) => { const next = { ...prev }; delete next[selectedReport.id]; return next; });
+                  setConfirmedLocal(selectedReport.id, false);
+                } else {
+                  confirmReport(selectedReport.id);
+                  setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+                  setConfirmedMap((prev) => ({ ...prev, [selectedReport.id]: true }));
+                  setConfirmedLocal(selectedReport.id, true);
+                }
               }}
               activeOpacity={0.8}
             >
               <Text style={styles.confirmBtnEmoji}>👍</Text>
-              <Text style={styles.confirmBtnText}>
+              <Text style={[styles.confirmBtnText, confirmedMap[selectedReport.id] && styles.confirmBtnTextActive]}>
                 {selectedReport.confirmations > 0
                   ? `${selectedReport.confirmations} confirmed`
                   : 'Still happening'}
@@ -839,7 +851,7 @@ export default function MapScreen() {
         }}
         activeOpacity={0.8}
       >
-        <Text style={styles.dropPinText}>📍</Text>
+        <Text style={styles.dropPinText}>⊕</Text>
       </TouchableOpacity>
 
       {/* Profile button */}
@@ -1542,6 +1554,9 @@ const styles = StyleSheet.create({
     marginBottom: 12,
     alignSelf: 'flex-start',
   },
+  confirmBtnActive: {
+    backgroundColor: '#e8f0fe',
+  },
   confirmBtnEmoji: {
     fontSize: 14,
   },
@@ -1549,6 +1564,9 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: '#666',
+  },
+  confirmBtnTextActive: {
+    color: '#1a73e8',
   },
   adminDeleteBtn: {
     position: 'absolute',
@@ -1602,7 +1620,9 @@ const styles = StyleSheet.create({
     backgroundColor: '#ff5252',
   },
   dropPinText: {
-    fontSize: 22,
+    color: '#fff',
+    fontSize: 26,
+    fontWeight: '300',
   },
   profileFloat: {
     position: 'absolute',

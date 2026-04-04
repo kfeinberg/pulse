@@ -938,11 +938,17 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
               }}
               onClick={(e) => {
                 e.stopPropagation();
-                if (confirmedMap[selectedReport.id]) return;
-                confirmReport(selectedReport.id);
-                setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
-                setConfirmedMap((prev) => ({ ...prev, [selectedReport.id]: true }));
-                setConfirmedLocal(selectedReport.id, true);
+                if (confirmedMap[selectedReport.id]) {
+                  confirmReport(selectedReport.id, -1);
+                  setSelectedReport({ ...selectedReport, confirmations: Math.max(0, selectedReport.confirmations - 1) });
+                  setConfirmedMap((prev) => { const next = { ...prev }; delete next[selectedReport.id]; return next; });
+                  setConfirmedLocal(selectedReport.id, false);
+                } else {
+                  confirmReport(selectedReport.id);
+                  setSelectedReport({ ...selectedReport, confirmations: selectedReport.confirmations + 1 });
+                  setConfirmedMap((prev) => ({ ...prev, [selectedReport.id]: true }));
+                  setConfirmedLocal(selectedReport.id, true);
+                }
               }}
             >
               <span>👍</span>

@@ -39,3 +39,20 @@ export async function setInterested(eventId: string, interested: boolean): Promi
   }
   await AsyncStorage.setItem(INTERESTED_KEY, JSON.stringify(all));
 }
+
+const CONFIRMED_KEY = 'report_confirmed';
+
+export async function getConfirmedReports(): Promise<Record<string, boolean>> {
+  const raw = await AsyncStorage.getItem(CONFIRMED_KEY);
+  return raw ? JSON.parse(raw) : {};
+}
+
+export async function setConfirmed(reportId: string, confirmed: boolean): Promise<void> {
+  const all = await getConfirmedReports();
+  if (confirmed) {
+    all[reportId] = true;
+  } else {
+    delete all[reportId];
+  }
+  await AsyncStorage.setItem(CONFIRMED_KEY, JSON.stringify(all));
+}

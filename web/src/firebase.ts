@@ -145,9 +145,9 @@ export function subscribeToReports(callback: (reports: Report[]) => void): () =>
   });
 }
 
-export async function confirmReport(reportId: string): Promise<void> {
+export async function confirmReport(reportId: string, delta: number = 1): Promise<void> {
   const ref = doc(db, 'reports', reportId);
-  await updateDoc(ref, { confirmations: increment(1) });
+  await updateDoc(ref, { confirmations: increment(delta) });
 }
 
 // User profiles
