@@ -523,7 +523,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       {/* Event preview card */}
       {selectedEvent && (
         <div style={styles.previewCard}>
-          {user?.email === 'kalli.feinberg@gmail.com' && (
+          {user?.email === 'kalli.feinberg@gmail.com' && !selectedEvent.sourceUrl && (
             <div
               style={styles.adminDelete}
               onClick={(e) => {
