@@ -112,12 +112,34 @@ export async function voteOnEvent(
 
 export async function markInterested(
   eventId: string,
-  wasInterested: boolean
+  wasInterested: boolean,
+  userId?: string
 ): Promise<void> {
   const ref = doc(db, EVENTS_COLLECTION, eventId);
   await updateDoc(ref, {
     interested: increment(wasInterested ? -1 : 1),
   });
+
+  // Store per-user interest in Firestore for push notifications
+  if (userId) {
+    const interestRef = doc(db, 'eventInterests', `${userId}_${eventId}`);
+    if (wasInterested) {
+      await deleteDoc(interestRef);
+    } else {
+      await setDoc(interestRef, { userId, eventId, createdAt: Timestamp.now() });
+    }
+  }
+}
+
+// Push tokens
+export async function savePushToken(userId: string, token: string): Promise<void> {
+  const ref = doc(db, 'users', userId);
+  const snap = await getDoc(ref);
+  if (snap.exists()) {
+    await updateDoc(ref, { expoPushToken: token });
+  } else {
+    await setDoc(ref, { expoPushToken: token }, { merge: true });
+  }
 }
 
 // Comments

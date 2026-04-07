@@ -10,6 +10,7 @@ import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constan
 import { EventCategory } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { signOut } from '@/services/auth';
+import { registerForPushNotifications } from '@/services/notifications';
 
 const WELCOME_KEY = 'pulse_welcomed';
 const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
@@ -277,13 +278,20 @@ export default function MapScreen() {
 
     try {
       await Promise.all([
-        markInterested(event.id, wasInterested),
+        markInterested(event.id, wasInterested, user?.uid),
         setInterestedLocal(event.id, !wasInterested),
       ]);
     } catch (e) {
       console.warn('Interested failed:', e);
     }
-  }, [interestedMap]);
+  }, [interestedMap, user]);
+
+  // Register for push notifications when user is signed in
+  useEffect(() => {
+    if (user) {
+      registerForPushNotifications(user.uid).catch(() => {});
+    }
+  }, [user]);
 
   const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
 
@@ -932,7 +940,7 @@ export default function MapScreen() {
                     longitude: pendingPin.longitude,
                     userId: user.uid,
                     userName: displayName || user.displayName || 'Anonymous',
-                    userPhoto: user.photoURL || undefined,
+                    ...(user.photoURL ? { userPhoto: user.photoURL } : {}),
                   });
                   setPendingPin(null);
                   setReportText('');

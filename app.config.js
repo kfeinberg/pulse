@@ -60,6 +60,13 @@ export default {
       "expo-apple-authentication",
       "@react-native-google-signin/google-signin",
       "@react-native-community/datetimepicker",
+      [
+        "expo-notifications",
+        {
+          icon: "./assets/images/icon.png",
+          color: "#ff5252",
+        },
+      ],
     ],
     experiments: {
       typedRoutes: true,

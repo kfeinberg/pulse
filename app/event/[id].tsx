@@ -1,5 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert } from 'react-native';
+import React, { useEffect, useState, useCallback } from 'react';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { CATEGORIES } from '@/constants/categories';
 import { EventCategory, Comment } from '@/types';
@@ -9,11 +9,12 @@ import { subscribeToComments, addComment, deleteEvent } from '@/services/firebas
 const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 
 export default function EventDetailScreen() {
-  const { id, title, category, description, startTime, endTime, sourceUrl, sourceUrls } = useLocalSearchParams<{
+  const { id, title, category, description, location, startTime, endTime, sourceUrl, sourceUrls } = useLocalSearchParams<{
     id: string;
     title: string;
     category: EventCategory;
     description: string;
+    location: string;
     startTime: string;
     endTime: string;
     sourceUrl: string;
@@ -95,6 +96,23 @@ export default function EventDetailScreen() {
     ]);
   };
 
+  const handleShare = useCallback(async () => {
+    const emoji = categoryConfig?.emoji || '';
+    const timeStr = `${formatTime(start)} — ${formatTime(end)}`;
+    const locationLine = location ? `\n${location}` : '';
+    const urlLine = urls.length > 0 ? `\n${urls[0]}` : '';
+
+    const message = `${emoji} ${title}${locationLine}\n${timeStr}${urlLine}\n\nFound on Pulse - discover what's happening in NYC\nhttps://pulse-3ed92.web.app/`;
+
+    try {
+      await Share.share(
+        Platform.OS === 'ios'
+          ? { message }
+          : { message, title: title || 'Check out this event' }
+      );
+    } catch {}
+  }, [title, location, start, end, urls, categoryConfig]);
+
   const isAdmin = user?.email === ADMIN_EMAIL;
 
   const timeAgo = (millis: number) => {
@@ -123,6 +141,9 @@ export default function EventDetailScreen() {
           <Text style={styles.timeRange}>
             {formatTime(start)} — {formatTime(end)}
           </Text>
+          <TouchableOpacity style={styles.shareButton} onPress={handleShare} activeOpacity={0.7}>
+            <Text style={styles.shareButtonIcon}>↗</Text>
+          </TouchableOpacity>
         </View>
         {description ? (
           <View style={styles.descriptionContainer}>
@@ -228,7 +249,7 @@ const styles = StyleSheet.create({
   deleteButton: {
     position: 'absolute',
     top: 100,
-    right: 24,
+    right: 68,
     backgroundColor: '#ff4444',
     paddingHorizontal: 14,
     paddingVertical: 6,
@@ -262,6 +283,22 @@ const styles = StyleSheet.create({
   },
   timeRange: {
     fontSize: 15,
+    color: '#666',
+  },
+  shareButton: {
+    position: 'absolute',
+    top: 100,
+    right: 24,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: '#f0f0f0',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  shareButtonIcon: {
+    fontSize: 18,
+    fontWeight: '700',
     color: '#666',
   },
   descriptionContainer: {
