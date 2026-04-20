@@ -40,6 +40,19 @@ export async function setInterested(eventId: string, interested: boolean): Promi
   await AsyncStorage.setItem(INTERESTED_KEY, JSON.stringify(all));
 }
 
+const HIDDEN_KEY = 'hidden_content';
+
+export async function getHiddenContent(): Promise<Record<string, boolean>> {
+  const raw = await AsyncStorage.getItem(HIDDEN_KEY);
+  return raw ? JSON.parse(raw) : {};
+}
+
+export async function setHidden(contentId: string): Promise<void> {
+  const all = await getHiddenContent();
+  all[contentId] = true;
+  await AsyncStorage.setItem(HIDDEN_KEY, JSON.stringify(all));
+}
+
 const CONFIRMED_KEY = 'report_confirmed';
 
 export async function getConfirmedReports(): Promise<Record<string, boolean>> {

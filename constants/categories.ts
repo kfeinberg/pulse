@@ -48,7 +48,7 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
 
 export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'bars', 'clubs', 'concerts'];
 
-export const ADMIN_PASSCODE = '5254';
+export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 
 export const NYC_REGION = {
   latitude: 40.7128,

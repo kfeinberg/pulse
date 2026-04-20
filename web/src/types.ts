@@ -34,6 +34,8 @@ export interface Report {
   expiresAt: Timestamp;
 }
 
+export type FlagReason = 'spam' | 'inappropriate' | 'harassment' | 'misleading';
+
 export interface AppEvent {
   id: string;
   title: string;

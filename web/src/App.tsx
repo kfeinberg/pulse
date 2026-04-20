@@ -1,10 +1,10 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
 import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
-import { subscribeToUpcomingEvents, voteOnEvent, markInterested, signInWithGoogle, signOut, onAuthChange, User, createReport, subscribeToReports, confirmReport, addComment, subscribeToComments, deleteEvent, deleteReport, getUserProfile, isDisplayNameTaken, setUserProfile } from './firebase';
-import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, VoteType } from './votes';
-import { CATEGORIES } from './categories';
+import { subscribeToUpcomingEvents, voteOnEvent, markInterested, signInWithGoogle, signOut, onAuthChange, User, createReport, subscribeToReports, confirmReport, addComment, subscribeToComments, deleteEvent, deleteReport, getUserProfile, isDisplayNameTaken, setUserProfile, deleteAccount, flagContent } from './firebase';
+import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from './votes';
+import { CATEGORIES, ADMIN_EMAIL } from './categories';
 import { MAP_STYLE } from './mapStyle';
-import { AppEvent, EventCategory, Comment, Report, ReportCategory } from './types';
+import { AppEvent, EventCategory, Comment, Report, ReportCategory, FlagReason } from './types';
 
 const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
   live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
@@ -170,6 +170,9 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [commentText, setCommentText] = useState('');
   const [submittingComment, setSubmittingComment] = useState(false);
   const [confirmedMap, setConfirmedMap] = useState<Record<string, boolean>>({});
+  const [flagMenuTarget, setFlagMenuTarget] = useState<{ type: 'comment' | 'report'; id: string; eventId?: string } | null>(null);
+  const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
+  const [showProfileMenu, setShowProfileMenu] = useState(false);
   const trackRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
 
@@ -178,6 +181,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     setVotes(getAllVotes());
     setInterestedMap(getInterestedEvents());
     setConfirmedMap(getConfirmedReports());
+    setHiddenMap(getHiddenContent());
   }, []);
 
   // Get user location
@@ -230,6 +234,24 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
 
     voteOnEvent(event.id, voteType, previousVote).catch(console.warn);
   }, [votes]);
+
+  const handleFlag = async (reason: FlagReason) => {
+    if (!flagMenuTarget) return;
+    if (user) {
+      await flagContent({
+        contentType: flagMenuTarget.type,
+        contentId: flagMenuTarget.id,
+        eventId: flagMenuTarget.eventId,
+        reason,
+        reporterId: user.uid,
+      });
+    }
+    setHidden(flagMenuTarget.id);
+    setHiddenMap((prev) => ({ ...prev, [flagMenuTarget.id]: true }));
+    if (flagMenuTarget.type === 'report') setSelectedReport(null);
+    setFlagMenuTarget(null);
+    alert('Thanks for helping keep Pulse safe.');
+  };
 
   const handleInterested = useCallback((event: AppEvent) => {
     const wasInterested = !!interestedMap[event.id];
@@ -385,6 +407,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           setSelectedReport(null);
           setTimelineOpen(false);
           setFiltersOpen(false);
+          setShowProfileMenu(false);
           setShowListView(false);
         }}
         options={{
@@ -434,7 +457,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           );
         })}
         {/* Report pins */}
-        {reports.map((report) => {
+        {reports.filter((r) => !hiddenMap[r.id]).map((report) => {
           const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
           return (
             <OverlayViewF
@@ -479,17 +502,41 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         <div style={styles.logoDot} />
         <span style={styles.logoText}>Pulse</span>
         {user ? (
-          <div
-            style={styles.userAvatar}
-            onClick={() => { if (confirm('Sign out?')) signOut(); }}
-            title={user.email || 'Sign out'}
-          >
-            {user.photoURL ? (
-              <img src={user.photoURL} style={styles.userAvatarImg} referrerPolicy="no-referrer" />
-            ) : (
-              <span style={styles.userAvatarText}>
-                {(user.displayName || user.email || '?')[0].toUpperCase()}
-              </span>
+          <div style={styles.profileWrapper}>
+            <div
+              style={styles.userAvatar}
+              onClick={() => setShowProfileMenu((v) => !v)}
+              title={user.email || 'Account'}
+            >
+              {user.photoURL ? (
+                <img src={user.photoURL} style={styles.userAvatarImg} referrerPolicy="no-referrer" />
+              ) : (
+                <span style={styles.userAvatarText}>
+                  {(user.displayName || user.email || '?')[0].toUpperCase()}
+                </span>
+              )}
+            </div>
+            {showProfileMenu && (
+              <div style={styles.profileMenu}>
+                <a href="/privacy" style={styles.profileMenuItem}>Privacy Policy</a>
+                <div
+                  style={styles.profileMenuItem}
+                  onClick={() => { setShowProfileMenu(false); signOut(); }}
+                >
+                  Sign out
+                </div>
+                <div
+                  style={{ ...styles.profileMenuItem, color: '#ff4444', borderBottom: 'none' }}
+                  onClick={() => {
+                    if (confirm('Delete your account? This will permanently remove all your data and cannot be undone.')) {
+                      setShowProfileMenu(false);
+                      deleteAccount().catch((e) => alert(e.message || 'Failed to delete account'));
+                    }
+                  }}
+                >
+                  Delete Account
+                </div>
+              </div>
             )}
           </div>
         ) : (
@@ -503,6 +550,9 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           </div>
         )}
       </div>
+
+      {/* Privacy link (bottom corner, always visible) */}
+      <a href="/privacy" style={styles.privacyCorner}>Privacy</a>
 
       {/* Category filter toggle + pills */}
       <div style={styles.filterContainer}>
@@ -547,7 +597,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       {/* Event preview card */}
       {selectedEvent && (
         <div style={styles.previewCard}>
-          {user?.email === 'kalli.feinberg@gmail.com' && !selectedEvent.sourceUrl && !(selectedEvent.sourceUrls?.length) && (
+          {user?.email === ADMIN_EMAIL && !selectedEvent.sourceUrl && !(selectedEvent.sourceUrls?.length) && (
             <div
               style={styles.adminDelete}
               onClick={(e) => {
@@ -664,7 +714,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           <div style={styles.commentsSection}>
             {comments.length > 0 && (
               <div style={styles.commentsList}>
-                {comments.map((c) => (
+                {comments.filter((c) => !hiddenMap[c.id]).map((c) => (
                   <div key={c.id} style={styles.commentItem}>
                     <div style={styles.commentAvatar}>
                       {c.userPhoto ? (
@@ -679,14 +729,22 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                       <span style={styles.commentAuthor}>{c.userName}</span>
                       <span style={styles.commentText}>{c.text}</span>
                     </div>
-                    <span style={styles.commentTime}>
-                      {(() => {
-                        const mins = Math.floor((Date.now() - c.createdAt.toMillis()) / 60000);
-                        if (mins < 1) return 'now';
-                        if (mins < 60) return `${mins}m`;
-                        return `${Math.floor(mins / 60)}h`;
-                      })()}
-                    </span>
+                    <div style={styles.commentActions}>
+                      <span style={styles.commentTime}>
+                        {(() => {
+                          const mins = Math.floor((Date.now() - c.createdAt.toMillis()) / 60000);
+                          if (mins < 1) return 'now';
+                          if (mins < 60) return `${mins}m`;
+                          return `${Math.floor(mins / 60)}h`;
+                        })()}
+                      </span>
+                      {(!user || c.userId !== user.uid) && (
+                        <span
+                          style={styles.flagButton}
+                          onClick={(e) => { e.stopPropagation(); setFlagMenuTarget({ type: 'comment', id: c.id, eventId: selectedEvent?.id }); }}
+                        >⚑</span>
+                      )}
+                    </div>
                   </div>
                 ))}
               </div>
@@ -900,7 +958,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       {/* Selected report card */}
       {selectedReport && (
         <div style={styles.previewCard}>
-          {user?.email === 'kalli.feinberg@gmail.com' && (
+          {user?.email === ADMIN_EMAIL && (
             <div
               style={styles.adminDelete}
               onClick={(e) => {
@@ -961,6 +1019,12 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   : 'Still happening'}
               </span>
             </button>
+            {(!user || selectedReport.userId !== user.uid) && (
+              <span
+                style={styles.flagButton}
+                onClick={(e) => { e.stopPropagation(); setFlagMenuTarget({ type: 'report', id: selectedReport.id }); }}
+              >⚑</span>
+            )}
           </div>
         </div>
       )}
@@ -1052,6 +1116,24 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
             >
               Explore
             </button>
+          </div>
+        </div>
+      )}
+      {flagMenuTarget && (
+        <div style={styles.flagOverlay} onClick={() => setFlagMenuTarget(null)}>
+          <div style={styles.flagMenu} onClick={(e) => e.stopPropagation()}>
+            <div style={styles.flagMenuTitle}>Why are you reporting this?</div>
+            {([
+              { value: 'spam' as FlagReason, label: 'Spam' },
+              { value: 'inappropriate' as FlagReason, label: 'Inappropriate' },
+              { value: 'harassment' as FlagReason, label: 'Harassment' },
+              { value: 'misleading' as FlagReason, label: 'Misleading' },
+            ]).map((r) => (
+              <button key={r.value} style={styles.flagMenuItem} onClick={() => handleFlag(r.value)}>
+                {r.label}
+              </button>
+            ))}
+            <button style={styles.flagMenuCancel} onClick={() => setFlagMenuTarget(null)}>Cancel</button>
           </div>
         </div>
       )}
@@ -1503,6 +1585,40 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     letterSpacing: 0.5,
   },
+  profileWrapper: {
+    position: 'relative' as const,
+    marginLeft: 4,
+  },
+  profileMenu: {
+    position: 'absolute' as const,
+    top: 34,
+    right: 0,
+    backgroundColor: '#1a1a1a',
+    borderRadius: 10,
+    boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
+    overflow: 'hidden',
+    minWidth: 140,
+    zIndex: 100,
+  },
+  profileMenuItem: {
+    display: 'block',
+    padding: '10px 16px',
+    fontSize: 13,
+    fontWeight: 500,
+    color: '#fff',
+    cursor: 'pointer',
+    textDecoration: 'none',
+    borderBottom: '1px solid rgba(255,255,255,0.1)',
+  },
+  privacyCorner: {
+    position: 'absolute' as const,
+    bottom: 8,
+    right: 8,
+    color: 'rgba(255,255,255,0.3)',
+    fontSize: 11,
+    textDecoration: 'none',
+    zIndex: 1,
+  },
   signInButton: {
     color: '#fff',
     fontSize: 12,
@@ -1729,10 +1845,16 @@ const styles: Record<string, React.CSSProperties> = {
   commentText: {
     color: '#444',
   },
+  commentActions: {
+    display: 'flex',
+    flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: 2,
+    flexShrink: 0,
+  },
   commentTime: {
     fontSize: 11,
     color: '#aaa',
-    flexShrink: 0,
     marginTop: 2,
   },
   commentInputRow: {
@@ -1960,5 +2082,62 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: 'pointer',
     letterSpacing: 0.3,
+  },
+  flagButton: {
+    cursor: 'pointer',
+    fontSize: 15,
+    color: '#999',
+    userSelect: 'none',
+  },
+  flagOverlay: {
+    position: 'fixed',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 9999,
+  },
+  flagMenu: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 8,
+    minWidth: 240,
+    boxShadow: '0 8px 32px rgba(0,0,0,0.2)',
+  },
+  flagMenuTitle: {
+    fontSize: 15,
+    fontWeight: 600,
+    color: '#1a1a1a',
+    padding: '12px 16px 8px',
+    textAlign: 'center',
+  },
+  flagMenuItem: {
+    display: 'block',
+    width: '100%',
+    padding: '12px 16px',
+    border: 'none',
+    background: 'none',
+    fontSize: 14,
+    color: '#333',
+    cursor: 'pointer',
+    textAlign: 'left',
+    borderRadius: 8,
+  },
+  flagMenuCancel: {
+    display: 'block',
+    width: '100%',
+    padding: '12px 16px',
+    border: 'none',
+    background: 'none',
+    fontSize: 14,
+    color: '#999',
+    cursor: 'pointer',
+    textAlign: 'center',
+    borderTop: '1px solid #eee',
+    marginTop: 4,
   },
 };

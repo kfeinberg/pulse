@@ -22,7 +22,8 @@ service cloud.firestore {
             || (request.resource.data.thumbsDown is int && request.resource.data.thumbsDown >= 0))
         && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['interested'])
             || (request.resource.data.interested is int && request.resource.data.interested >= 0));
-      allow create: if false;
+      allow create: if request.auth != null
+        && request.auth.token.email == 'kalli.feinberg@gmail.com';
       allow delete: if request.auth != null
         && request.auth.token.email == 'kalli.feinberg@gmail.com';
 
@@ -36,6 +37,18 @@ service cloud.firestore {
           && request.resource.data.text.size() <= 280;
         allow update, delete: if false;
       }
+    }
+
+    match /flags/{flagId} {
+      allow read: if request.auth != null
+        && request.auth.token.email == 'kalli.feinberg@gmail.com';
+      allow create: if request.auth != null
+        && request.resource.data.reporterId == request.auth.uid
+        && request.resource.data.keys().hasAll(['contentType', 'contentId', 'reason', 'reporterId', 'createdAt'])
+        && request.resource.data.contentType in ['comment', 'report']
+        && request.resource.data.reason in ['spam', 'inappropriate', 'harassment', 'misleading'];
+      allow update, delete: if request.auth != null
+        && request.auth.token.email == 'kalli.feinberg@gmail.com';
     }
 
     match /reports/{reportId} {

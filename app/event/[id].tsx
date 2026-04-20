@@ -1,12 +1,20 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { CATEGORIES } from '@/constants/categories';
+import { CATEGORIES, ADMIN_EMAIL } from '@/constants/categories';
 import { EventCategory, Comment } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
-import { subscribeToComments, addComment, deleteEvent } from '@/services/firebase';
+import { subscribeToComments, addComment, deleteEvent, flagContent } from '@/services/firebase';
+import { getHiddenContent, setHidden } from '@/services/votes';
+import { FlagReason } from '@/types';
 
-const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
+const FLAG_REASONS: { value: FlagReason; label: string }[] = [
+  { value: 'spam', label: 'Spam' },
+  { value: 'inappropriate', label: 'Inappropriate' },
+  { value: 'harassment', label: 'Harassment' },
+  { value: 'misleading', label: 'Misleading' },
+];
+
 
 export default function EventDetailScreen() {
   const { id, title, category, description, location, startTime, endTime, sourceUrl, sourceUrls } = useLocalSearchParams<{
@@ -34,6 +42,7 @@ export default function EventDetailScreen() {
   const [comments, setComments] = useState<Comment[]>([]);
   const [commentText, setCommentText] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
 
   const categoryConfig = CATEGORIES[category as EventCategory];
   const start = new Date(Number(startTime));
@@ -44,6 +53,10 @@ export default function EventDetailScreen() {
     const unsubscribe = subscribeToComments(id, setComments);
     return () => unsubscribe();
   }, [id]);
+
+  useEffect(() => {
+    getHiddenContent().then(setHiddenMap);
+  }, []);
 
   const formatTime = (date: Date) => {
     const now = new Date();
@@ -115,6 +128,32 @@ export default function EventDetailScreen() {
 
   const isAdmin = user?.email === ADMIN_EMAIL;
 
+  const handleFlagComment = (comment: Comment) => {
+    if (user && comment.userId === user.uid) return;
+    Alert.alert('Report Comment', 'Why are you reporting this comment?',
+      [
+        ...FLAG_REASONS.map((r) => ({
+          text: r.label,
+          onPress: async () => {
+            if (user) {
+              await flagContent({
+                contentType: 'comment' as const,
+                contentId: comment.id,
+                eventId: id,
+                reason: r.value,
+                reporterId: user.uid,
+              });
+            }
+            await setHidden(comment.id);
+            setHiddenMap((prev) => ({ ...prev, [comment.id]: true }));
+            Alert.alert('Reported', 'Thanks for helping keep Pulse safe.');
+          },
+        })),
+        { text: 'Cancel', style: 'cancel' as const },
+      ]
+    );
+  };
+
   const timeAgo = (millis: number) => {
     const mins = Math.floor((Date.now() - millis) / 60000);
     if (mins < 1) return 'now';
@@ -175,7 +214,7 @@ export default function EventDetailScreen() {
           <Text style={styles.commentsTitle}>
             Comments{comments.length > 0 ? ` (${comments.length})` : ''}
           </Text>
-          {comments.map((c) => (
+          {comments.filter((c) => !hiddenMap[c.id]).map((c) => (
             <View key={c.id} style={styles.commentItem}>
               {c.userPhoto ? (
                 <Image source={{ uri: c.userPhoto }} style={styles.commentAvatar} />
@@ -190,7 +229,14 @@ export default function EventDetailScreen() {
                 <Text style={styles.commentAuthor}>{c.userName}</Text>
                 <Text style={styles.commentContent}>{c.text}</Text>
               </View>
-              <Text style={styles.commentTime}>{timeAgo(c.createdAt.toMillis())}</Text>
+              <View style={styles.commentActions}>
+                <Text style={styles.commentTime}>{timeAgo(c.createdAt.toMillis())}</Text>
+                {(!user || c.userId !== user.uid) && (
+                  <TouchableOpacity onPress={() => handleFlagComment(c)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={styles.flagIcon}>⚑</Text>
+                  </TouchableOpacity>
+                )}
+              </View>
             </View>
           ))}
           {comments.length === 0 && (
@@ -373,10 +419,18 @@ const styles = StyleSheet.create({
     color: '#444',
     lineHeight: 20,
   },
+  commentActions: {
+    alignItems: 'flex-end',
+    gap: 4,
+  },
   commentTime: {
     fontSize: 11,
     color: '#aaa',
     marginTop: 2,
+  },
+  flagIcon: {
+    fontSize: 15,
+    color: '#999',
   },
   noComments: {
     fontSize: 14,

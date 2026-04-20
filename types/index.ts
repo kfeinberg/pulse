@@ -52,6 +52,18 @@ export interface UserProfile {
   createdAt: Timestamp;
 }
 
+export type FlagReason = 'spam' | 'inappropriate' | 'harassment' | 'misleading';
+
+export interface Flag {
+  id: string;
+  contentType: 'comment' | 'report';
+  contentId: string;
+  eventId?: string;
+  reason: FlagReason;
+  reporterId: string;
+  createdAt: Timestamp;
+}
+
 export interface NewEventInput {
   title: string;
   description: string;

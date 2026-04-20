@@ -41,6 +41,23 @@ export function setInterested(eventId: string, interested: boolean): void {
   localStorage.setItem(INTERESTED_KEY, JSON.stringify(all));
 }
 
+const HIDDEN_KEY = 'hidden_content';
+
+export function getHiddenContent(): Record<string, boolean> {
+  try {
+    const raw = localStorage.getItem(HIDDEN_KEY);
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return {};
+  }
+}
+
+export function setHidden(contentId: string): void {
+  const all = getHiddenContent();
+  all[contentId] = true;
+  localStorage.setItem(HIDDEN_KEY, JSON.stringify(all));
+}
+
 const CONFIRMED_KEY = 'report_confirmed';
 
 export function getConfirmedReports(): Record<string, boolean> {

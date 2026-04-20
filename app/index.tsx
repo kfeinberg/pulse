@@ -3,17 +3,16 @@ import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureRes
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent, Report, ReportCategory } from '@/types';
-import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport } from '@/services/firebase';
-import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, VoteType } from '@/services/votes';
+import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport, deleteAccount, flagContent } from '@/services/firebase';
+import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_PASSCODE } from '@/constants/categories';
-import { EventCategory } from '@/types';
+import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_EMAIL } from '@/constants/categories';
+import { EventCategory, FlagReason } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
 
 const WELCOME_KEY = 'pulse_welcomed';
-const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 
 const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
   live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
@@ -25,7 +24,6 @@ const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; 
 };
 
 import { MAP_STYLE } from '@/constants/mapStyle';
-import { AdminPasscodeModal } from '@/components/AdminPasscodeModal';
 
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3958.8;
@@ -40,7 +38,6 @@ function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): nu
 export default function MapScreen() {
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
-  const [showPasscodeModal, setShowPasscodeModal] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
   const [showWelcome, setShowWelcome] = useState(true);
@@ -65,12 +62,45 @@ export default function MapScreen() {
   const [reports, setReports] = useState<Report[]>([]);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
   const [confirmedMap, setConfirmedMap] = useState<Record<string, boolean>>({});
+  const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
   const [pinDropMode, setPinDropMode] = useState(false);
   const [pendingPin, setPendingPin] = useState<{ latitude: number; longitude: number } | null>(null);
   const [reportText, setReportText] = useState('');
   const [reportCategory, setReportCategory] = useState<ReportCategory>('other');
   const [submittingReport, setSubmittingReport] = useState(false);
   const isAdmin = user?.email === ADMIN_EMAIL;
+
+  const handleFlagReport = (report: Report) => {
+    if (user && report.userId === user.uid) return;
+    const reasons: { value: FlagReason; label: string }[] = [
+      { value: 'spam', label: 'Spam' },
+      { value: 'inappropriate', label: 'Inappropriate' },
+      { value: 'harassment', label: 'Harassment' },
+      { value: 'misleading', label: 'Misleading' },
+    ];
+    Alert.alert('Report This Pin', 'Why are you reporting this?',
+      [
+        ...reasons.map((r) => ({
+          text: r.label,
+          onPress: async () => {
+            if (user) {
+              await flagContent({
+                contentType: 'report' as const,
+                contentId: report.id,
+                reason: r.value,
+                reporterId: user.uid,
+              });
+            }
+            await setHidden(report.id);
+            setHiddenMap((prev) => ({ ...prev, [report.id]: true }));
+            setSelectedReport(null);
+            Alert.alert('Reported', 'Thanks for helping keep Pulse safe.');
+          },
+        })),
+        { text: 'Cancel', style: 'cancel' as const },
+      ]
+    );
+  };
 
   // Check if user has seen welcome before
   useEffect(() => {
@@ -211,6 +241,7 @@ export default function MapScreen() {
     getAllVotes().then(setVotes).catch(() => {});
     getInterestedEvents().then(setInterestedMap).catch(() => {});
     getConfirmedReports().then(setConfirmedMap).catch(() => {});
+    getHiddenContent().then(setHiddenMap).catch(() => {});
   }, []);
 
   const handleVote = useCallback(async (event: AppEvent, voteType: 'up' | 'down') => {
@@ -400,20 +431,7 @@ export default function MapScreen() {
   }, [events, userLocation]);
 
   const handleAdminPress = () => {
-    if (isAdmin) {
-      router.push('/admin');
-    } else {
-      setShowPasscodeModal(true);
-    }
-  };
-
-  const handlePasscodeSubmit = (code: string) => {
-    if (code === ADMIN_PASSCODE) {
-      setShowPasscodeModal(false);
-      router.push('/admin');
-    } else {
-      Alert.alert('Incorrect', 'Wrong passcode. Try again.');
-    }
+    router.push('/admin');
   };
 
   const formatDistance = (event: AppEvent): string | null => {
@@ -486,7 +504,7 @@ export default function MapScreen() {
           );
         })}
         {/* Report markers */}
-        {reports.map((report) => {
+        {reports.filter((r) => !hiddenMap[r.id]).map((report) => {
           const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
           return (
             <Marker
@@ -603,6 +621,7 @@ export default function MapScreen() {
                     <Text style={styles.previewDistance}> · {formatDistance(selectedEvent)}</Text>
                   )}
                 </Text>
+                <Text style={styles.previewHint}>Tap for details →</Text>
               </View>
             </View>
           </TouchableOpacity>
@@ -824,6 +843,15 @@ export default function MapScreen() {
                   : 'Still happening'}
               </Text>
             </TouchableOpacity>
+            {(!user || selectedReport.userId !== user.uid) && (
+              <TouchableOpacity
+                style={styles.flagBtn}
+                onPress={() => handleFlagReport(selectedReport)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              >
+                <Text style={styles.flagBtnText}>⚑</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </View>
       )}
@@ -868,8 +896,33 @@ export default function MapScreen() {
           style={styles.profileFloat}
           onPress={() => {
             Alert.alert(displayName || 'Account', user.email || '', [
+              { text: 'Privacy Policy', onPress: () => Linking.openURL('https://pulse-3ed92.web.app/privacy') },
+              {
+                text: 'Delete Account',
+                style: 'destructive',
+                onPress: () => {
+                  Alert.alert(
+                    'Delete Account',
+                    'This will permanently delete your account, comments, reports, and all associated data. This cannot be undone.',
+                    [
+                      { text: 'Cancel', style: 'cancel' },
+                      {
+                        text: 'Delete',
+                        style: 'destructive',
+                        onPress: async () => {
+                          try {
+                            await deleteAccount();
+                          } catch (e: any) {
+                            Alert.alert('Error', e.message || 'Failed to delete account');
+                          }
+                        },
+                      },
+                    ]
+                  );
+                },
+              },
+              { text: 'Sign out', onPress: () => signOut() },
               { text: 'Cancel', style: 'cancel' },
-              { text: 'Sign out', style: 'destructive', onPress: () => signOut() },
             ]);
           }}
           activeOpacity={0.8}
@@ -959,12 +1012,6 @@ export default function MapScreen() {
         </View>
       </Modal>
 
-      <AdminPasscodeModal
-        visible={showPasscodeModal}
-        onClose={() => setShowPasscodeModal(false)}
-        onSubmit={handlePasscodeSubmit}
-      />
-
       {/* Welcome modal */}
       {showWelcome && (
         <View style={styles.welcomeBackdrop}>
@@ -989,6 +1036,9 @@ export default function MapScreen() {
             </View>
             <TouchableOpacity style={styles.welcomeButton} onPress={handleDismissWelcome} activeOpacity={0.8}>
               <Text style={styles.welcomeButtonText}>Explore</Text>
+            </TouchableOpacity>
+            <TouchableOpacity onPress={() => Linking.openURL('https://pulse-3ed92.web.app/privacy')} activeOpacity={0.7}>
+              <Text style={styles.privacyLink}>Privacy Policy</Text>
             </TouchableOpacity>
           </View>
         </View>
@@ -1159,6 +1209,12 @@ const styles = StyleSheet.create({
   previewDistance: {
     color: '#2a7cff',
     fontWeight: '600',
+  },
+  previewHint: {
+    fontSize: 12,
+    color: '#2a7cff',
+    fontWeight: '600',
+    marginTop: 4,
   },
   cardActions: {
     flexDirection: 'row',
@@ -1425,26 +1481,6 @@ const styles = StyleSheet.create({
     color: '#fff',
     fontSize: 22,
   },
-  adminButton: {
-    position: 'absolute',
-    bottom: 40,
-    left: 20,
-    width: 50,
-    height: 50,
-    borderRadius: 25,
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-  adminButtonText: {
-    color: '#fff',
-    fontSize: 22,
-  },
   welcomeBackdrop: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
@@ -1521,6 +1557,11 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     letterSpacing: 0.3,
   },
+  privacyLink: {
+    color: 'rgba(255,255,255,0.4)',
+    fontSize: 12,
+    marginTop: 16,
+  },
   reportMarker: {
     width: 40,
     height: 40,
@@ -1575,6 +1616,16 @@ const styles = StyleSheet.create({
   },
   confirmBtnTextActive: {
     color: '#1a73e8',
+  },
+  flagBtn: {
+    position: 'absolute',
+    top: 10,
+    right: 12,
+    padding: 4,
+  },
+  flagBtnText: {
+    fontSize: 18,
+    color: '#999',
   },
   adminDeleteBtn: {
     position: 'absolute',

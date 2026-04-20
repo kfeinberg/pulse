@@ -15,3 +15,5 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
   clubs: { label: 'Clubs', emoji: '💃', color: '#6A1B9A', backgroundColor: '#F3E5F5' },
   concerts: { label: 'Concerts', emoji: '\u{1F3B5}', color: '#EF6C00', backgroundColor: '#FFF3E0' },
 };
+
+export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';

@@ -1,4 +1,4 @@
-import { AppEvent, NewEventInput, Report, Comment, ReportCategory, UserProfile } from '@/types';
+import { AppEvent, NewEventInput, Report, Comment, ReportCategory, UserProfile, FlagReason } from '@/types';
 import { initializeApp, getApps } from 'firebase/app';
 import {
   Timestamp,
@@ -17,6 +17,7 @@ import {
   updateDoc,
   where,
 } from 'firebase/firestore';
+import { getFunctions, httpsCallable } from 'firebase/functions';
 
 const firebaseConfig = {
   apiKey: process.env.EXPO_PUBLIC_FIREBASE_API_KEY,
@@ -30,6 +31,7 @@ const firebaseConfig = {
 
 const app = getApps().length === 0 ? initializeApp(firebaseConfig) : getApps()[0];
 const db = getFirestore(app);
+const functions = getFunctions(app);
 
 const EVENTS_COLLECTION = 'events';
 
@@ -48,6 +50,7 @@ export async function isDisplayNameTaken(displayName: string): Promise<boolean> 
 
 export async function setUserProfile(uid: string, displayName: string, photoURL?: string): Promise<void> {
   await setDoc(doc(db, 'users', uid), {
+    uid,
     displayName,
     photoURL: photoURL || null,
     createdAt: Timestamp.now(),
@@ -217,4 +220,23 @@ export async function confirmReport(reportId: string, delta: number = 1): Promis
 
 export async function deleteReport(reportId: string): Promise<void> {
   await deleteDoc(doc(db, 'reports', reportId));
+}
+
+export async function flagContent(params: {
+  contentType: 'comment' | 'report';
+  contentId: string;
+  eventId?: string;
+  reason: FlagReason;
+  reporterId: string;
+}): Promise<string> {
+  const docRef = await addDoc(collection(db, 'flags'), {
+    ...params,
+    createdAt: Timestamp.now(),
+  });
+  return docRef.id;
+}
+
+export async function deleteAccount(): Promise<void> {
+  const deleteAccountFn = httpsCallable(functions, 'deleteAccount');
+  await deleteAccountFn();
 }

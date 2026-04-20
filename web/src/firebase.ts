@@ -24,7 +24,8 @@ import {
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
-import { AppEvent, Comment, Report, ReportCategory, UserProfile } from './types';
+import { getFunctions, httpsCallable } from 'firebase/functions';
+import { AppEvent, Comment, Report, ReportCategory, UserProfile, FlagReason } from './types';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -39,6 +40,7 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db = getFirestore(app);
 const auth = getAuth(app);
+const functions = getFunctions(app);
 const googleProvider = new GoogleAuthProvider();
 
 export { auth };
@@ -168,6 +170,7 @@ export async function isDisplayNameTaken(displayName: string): Promise<boolean> 
 
 export async function setUserProfile(uid: string, displayName: string, photoURL?: string): Promise<void> {
   await setDoc(doc(db, 'users', uid), {
+    uid,
     displayName,
     photoURL: photoURL || null,
     createdAt: Timestamp.now(),
@@ -180,6 +183,26 @@ export async function deleteEvent(eventId: string): Promise<void> {
 
 export async function deleteReport(reportId: string): Promise<void> {
   await deleteDoc(doc(db, 'reports', reportId));
+}
+
+export async function deleteAccount(): Promise<void> {
+  const deleteAccountFn = httpsCallable(functions, 'deleteAccount');
+  await deleteAccountFn();
+}
+
+// Flags
+export async function flagContent(params: {
+  contentType: 'comment' | 'report';
+  contentId: string;
+  eventId?: string;
+  reason: FlagReason;
+  reporterId: string;
+}): Promise<string> {
+  const docRef = await addDoc(collection(db, 'flags'), {
+    ...params,
+    createdAt: Timestamp.now(),
+  });
+  return docRef.id;
 }
 
 // Comments

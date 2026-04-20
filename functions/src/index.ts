@@ -1,7 +1,8 @@
 import { initializeApp } from "firebase-admin/app";
+import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
-import { onRequest } from "firebase-functions/v2/https";
+import { onRequest, onCall, HttpsError } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
 import { getAllSources } from "./scrapers/index.js";
 import { writeScrapedEvents } from "./services/firestore.js";
@@ -217,5 +218,64 @@ export const sendEventReminders = onSchedule(
     }
 
     console.log(`Sent ${messages.length} push notifications`);
+  }
+);
+
+// Callable: delete a user's account and all associated data
+export const deleteAccount = onCall(
+  { timeoutSeconds: 60 },
+  async (request) => {
+    const uid = request.auth?.uid;
+    if (!uid) {
+      throw new HttpsError("unauthenticated", "Must be signed in");
+    }
+
+    const db = getFirestore();
+    const batch = db.batch();
+
+    // Delete user profile
+    batch.delete(db.collection("users").doc(uid));
+
+    // Delete user's reports
+    const reportsSnap = await db
+      .collection("reports")
+      .where("userId", "==", uid)
+      .get();
+    for (const doc of reportsSnap.docs) {
+      batch.delete(doc.ref);
+    }
+
+    // Delete user's event interests
+    const interestsSnap = await db
+      .collection("eventInterests")
+      .where("userId", "==", uid)
+      .get();
+    for (const doc of interestsSnap.docs) {
+      batch.delete(doc.ref);
+    }
+
+    await batch.commit();
+
+    // Delete comments across all events (subcollections need separate queries)
+    const eventsSnap = await db.collection("events").get();
+    for (const eventDoc of eventsSnap.docs) {
+      const commentsSnap = await eventDoc.ref
+        .collection("comments")
+        .where("userId", "==", uid)
+        .get();
+      if (!commentsSnap.empty) {
+        const commentBatch = db.batch();
+        for (const commentDoc of commentsSnap.docs) {
+          commentBatch.delete(commentDoc.ref);
+        }
+        await commentBatch.commit();
+      }
+    }
+
+    // Delete the Firebase Auth user
+    await getAuth().deleteUser(uid);
+
+    console.log(`Deleted account and data for user ${uid}`);
+    return { success: true };
   }
 );
