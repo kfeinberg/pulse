@@ -87,7 +87,7 @@ export default function EventDetailScreen() {
         text,
         userId: user.uid,
         userName: displayName || user.displayName || 'Anonymous',
-        userPhoto: user.photoURL || undefined,
+        ...(user.photoURL ? { userPhoto: user.photoURL } : {}),
       });
     } catch (err) {
       console.error('Failed to add comment:', err);
