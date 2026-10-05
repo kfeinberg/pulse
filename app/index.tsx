@@ -468,8 +468,13 @@ export default function MapScreen() {
         ref={mapRef}
         style={styles.map}
         provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
+        mapType={Platform.OS === 'ios' ? 'mutedStandard' : 'standard'}
         initialRegion={NYC_REGION}
-        customMapStyle={MAP_STYLE}
+        customMapStyle={Platform.OS === 'android' ? MAP_STYLE : undefined}
+        showsPointsOfInterests={false}
+        showsBuildings={false}
+        showsTraffic={false}
+        showsIndoors={false}
         showsUserLocation
         showsMyLocationButton={false}
         onUserLocationChange={(e) => {
@@ -540,6 +545,7 @@ export default function MapScreen() {
           </Marker>
         )}
       </MapView>
+      {Platform.OS === 'ios' && <View pointerEvents="none" style={styles.mapTintOverlay} />}
 
       {/* Category filter toggle + pills */}
       {!selectedEvent && (
@@ -1062,6 +1068,10 @@ const styles = StyleSheet.create({
   },
   map: {
     flex: 1,
+  },
+  mapTintOverlay: {
+    ...StyleSheet.absoluteFill,
+    backgroundColor: 'rgba(250, 238, 214, 0.10)',
   },
   markerWrapper: {
     alignItems: 'center',
