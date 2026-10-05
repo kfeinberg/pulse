@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent, Report, ReportCategory } from '@/types';
@@ -467,7 +467,7 @@ export default function MapScreen() {
       <MapView
         ref={mapRef}
         style={styles.map}
-        provider={PROVIDER_GOOGLE}
+        provider={Platform.OS === 'android' ? PROVIDER_GOOGLE : undefined}
         initialRegion={NYC_REGION}
         customMapStyle={MAP_STYLE}
         showsUserLocation
