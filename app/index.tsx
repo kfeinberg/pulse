@@ -473,7 +473,9 @@ export default function MapScreen() {
         showsUserLocation
         showsMyLocationButton={false}
         onUserLocationChange={(e) => {
-          const { latitude, longitude } = e.nativeEvent.coordinate;
+          const coordinate = e.nativeEvent.coordinate;
+          if (!coordinate) return;
+          const { latitude, longitude } = coordinate;
           setUserLocation({ latitude, longitude });
         }}
         onPress={handleMapPress}
@@ -1387,7 +1389,7 @@ const styles = StyleSheet.create({
     fontSize: 22,
   },
   listOverlay: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#fff',
     zIndex: 100,
   },
@@ -1482,7 +1484,7 @@ const styles = StyleSheet.create({
     fontSize: 22,
   },
   welcomeBackdrop: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: 'rgba(0, 0, 0, 0.6)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -1808,7 +1810,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
   },
   splash: {
-    ...StyleSheet.absoluteFillObject,
+    ...StyleSheet.absoluteFill,
     backgroundColor: '#1a1a1a',
     alignItems: 'center',
     justifyContent: 'center',
