@@ -1,54 +1,31 @@
-import { getFirestore, Timestamp } from "firebase-admin/firestore";
+import { getFirestore, Timestamp, type DocumentReference } from "firebase-admin/firestore";
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
+import { resolveEventLocation, type ResolvedLocation } from "./geocoder.js";
 
 
 const EVENTS_COLLECTION = "events";
 
-interface GeoResult {
-  latitude: number;
-  longitude: number;
+function resolvedLocationFields(geo: ResolvedLocation): Record<string, unknown> {
+  return {
+    latitude: geo.latitude,
+    longitude: geo.longitude,
+    resolvedAddress: geo.formattedAddress,
+    resolvedPlaceName: geo.placeName,
+    geocodingProvider: geo.provider,
+    geocodingQuery: geo.query,
+    geocodedAt: Timestamp.now(),
+    osmId: geo.osmId,
+    osmType: geo.osmType,
+  };
 }
 
-async function geocodeWithClaude(
-  location: string,
-  apiKey: string
-): Promise<GeoResult> {
-  const fallback: GeoResult = { latitude: 40.7128, longitude: -74.006 };
-  if (!location) return fallback;
-
-  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
-
-  const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 256,
-    messages: [
-      {
-        role: "user",
-        content: `Given this NYC location/address, return the approximate latitude and longitude as JSON: {"latitude": number, "longitude": number}. Location: "${location}". Return ONLY the JSON, nothing else.`,
-      },
-    ],
-  });
-
-  const text =
-    message.content[0].type === "text" ? message.content[0].text : "";
-
-  try {
-    const cleaned = text
-      .replace(/^```(?:json)?\n?/g, "")
-      .replace(/\n?```$/g, "");
-    const result = JSON.parse(cleaned) as GeoResult;
-    if (
-      typeof result.latitude === "number" &&
-      typeof result.longitude === "number"
-    ) {
-      return result;
-    }
-  } catch {
-    console.warn(`Geocoding failed for "${location}", using fallback`);
-  }
-
-  return fallback;
+async function updateResolvedLocation(
+  ref: DocumentReference,
+  geo: ResolvedLocation | null
+): Promise<void> {
+  if (!geo) return;
+  await ref.update(resolvedLocationFields(geo));
 }
 
 async function findFuzzyDuplicate(
@@ -127,18 +104,23 @@ export async function writeScrapedEvents(
     }
 
     const newUrl = event.sourceUrl || null;
+    const geo = await resolveEventLocation(event);
 
     // Exact dedup: same title + same start time
     const titleTimeQuery = await db
       .collection(EVENTS_COLLECTION)
       .where("title", "==", event.title)
       .where("startTime", "==", Timestamp.fromDate(startDate))
-      .limit(1)
       .get();
 
-    if (!titleTimeQuery.empty) {
-      // Merge URL if new
-      const existingDoc = titleTimeQuery.docs[0];
+    const titleTimeMatch = titleTimeQuery.docs.find(
+      (doc) => (doc.data().location || "").trim().toLowerCase() === event.location.trim().toLowerCase()
+    );
+    if (titleTimeMatch) {
+      // Only merge title+time matches at the same named place. Multi-location
+      // events often share a title and start time but need separate pins.
+      const existingDoc = titleTimeMatch;
+      await updateResolvedLocation(existingDoc.ref, geo);
       if (newUrl) {
         const data = existingDoc.data();
         const existingUrls: string[] = data.sourceUrls || (data.sourceUrl ? [data.sourceUrl] : []);
@@ -166,6 +148,7 @@ export async function writeScrapedEvents(
 
       if (!titleLocQuery.empty) {
         const existingDoc = titleLocQuery.docs[0];
+        await updateResolvedLocation(existingDoc.ref, geo);
         if (newUrl) {
           const data = existingDoc.data();
           const existingUrls: string[] = data.sourceUrls || (data.sourceUrl ? [data.sourceUrl] : []);
@@ -207,6 +190,7 @@ export async function writeScrapedEvents(
         const matchId = await findFuzzyDuplicate(event, startDate, candidates, apiKey);
         if (matchId) {
           const matchRef = db.collection(EVENTS_COLLECTION).doc(matchId);
+          await updateResolvedLocation(matchRef, geo);
           const matchDoc = await matchRef.get();
           const matchData = matchDoc.data();
           if (matchData && newUrl) {
@@ -227,19 +211,18 @@ export async function writeScrapedEvents(
       }
     }
 
-    // No duplicate found — add new event
-    const geo =
-      event.latitude != null && event.longitude != null
-        ? { latitude: event.latitude, longitude: event.longitude }
-        : await geocodeWithClaude(event.location, apiKey);
+    // No duplicate found — add only events whose location can be resolved exactly.
+    if (!geo) {
+      console.warn(`Skipped: unresolved location for "${event.title}" at "${event.location}"`);
+      continue;
+    }
 
     await db.collection(EVENTS_COLLECTION).add({
       title: event.title,
       description: event.description,
       location: event.location,
       category,
-      latitude: geo.latitude,
-      longitude: geo.longitude,
+      ...resolvedLocationFields(geo),
       startTime: Timestamp.fromDate(startDate),
       endTime: Timestamp.fromDate(endDate),
       sourceUrl: newUrl,

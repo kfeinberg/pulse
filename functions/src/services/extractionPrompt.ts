@@ -8,7 +8,7 @@ For each event, extract:
 - date: the date in YYYY-MM-DD format
 - startTime: start time in HH:MM format (24h), or "" if unknown
 - endTime: end time in HH:MM format (24h), or "" if unknown
-- location: the venue name and/or address in NYC
+- location: the exact venue/place name first, followed by its full street address and borough when available (for example, "e's Bar, 511 Amsterdam Ave, Manhattan"). Preserve the named place rather than substituting a nearby landmark or coordinates.
 - category: "popup", "free_stuff", "happening", "bars", "clubs", or "concerts" (see rules below)
 - url: the URL linking to this specific event's detail page, or "" if not found. Look for URLs near the event title or in parentheses after the event name. Only include URLs that point to a specific event page, NOT a general calendar or listing page.
 
