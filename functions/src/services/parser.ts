@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
 import { EXTRACTION_PROMPT } from "./extractionPrompt.js";
+import { resolveEventbriteUrl } from "./eventUrl.js";
 
 
 export function stripHtml(html: string): string {
@@ -210,7 +211,7 @@ async function sendToClaude(
   // Second pass: resolve vague multi-location events
   const resolvedEvents = await resolveVagueLocations(parsed, client);
 
-  return resolvedEvents.map((e) => {
+  return Promise.all(resolvedEvents.map(async (e) => {
     const dateStr = e.date || new Date().toISOString().split("T")[0];
     // Normalize time strings: handle "24:00" -> "00:00", ensure HH:MM format
     const normalizeTime = (t: string, fallback: string): string => {
@@ -248,6 +249,22 @@ async function sendToClaude(
       endTimestamp = new Date(`${nextDay}T${endTimeStr}:00${tzOffset}`).getTime();
     }
     console.log(`Parsed event: "${e.title}" date=${dateStr} start=${startTimeStr} end=${endTimeStr} startTs=${startTimestamp} endTs=${endTimestamp} category=${e.category}`);
+
+    let candidateSourceUrl = sourceUrl;
+    if (e.url) {
+      if (e.url.startsWith("/")) {
+        try {
+          candidateSourceUrl = `${new URL(sourceUrl).origin}${e.url}`;
+        } catch {
+          candidateSourceUrl = sourceUrl;
+        }
+      } else {
+        candidateSourceUrl = e.url;
+      }
+    }
+    const resolvedSourceUrl =
+      (await resolveEventbriteUrl(e.title || "Untitled Event", candidateSourceUrl)) || sourceUrl;
+
     return {
       title: e.title || "Untitled Event",
       description: e.description || "",
@@ -255,22 +272,10 @@ async function sendToClaude(
       endTimestamp,
       location: e.location || "",
       category: (["popup", "free_stuff", "happening", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
-      sourceUrl: (() => {
-        if (!e.url) return sourceUrl;
-        // Normalize relative URLs using the source's origin
-        if (e.url.startsWith("/")) {
-          try {
-            const origin = new URL(sourceUrl).origin;
-            return `${origin}${e.url}`;
-          } catch {
-            return sourceUrl;
-          }
-        }
-        return e.url;
-      })(),
+      sourceUrl: resolvedSourceUrl,
       sourceName,
     };
-  });
+  }));
 }
 
 export async function parseEventsFromHtml(

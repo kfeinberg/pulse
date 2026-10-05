@@ -2,6 +2,7 @@ import { getFirestore, Timestamp, type DocumentReference } from "firebase-admin/
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
 import { resolveEventLocation, type ResolvedLocation } from "./geocoder.js";
+import { isUsableEventUrl } from "./eventUrl.js";
 
 
 const EVENTS_COLLECTION = "events";
@@ -26,6 +27,32 @@ async function updateResolvedLocation(
 ): Promise<void> {
   if (!geo) return;
   await ref.update(resolvedLocationFields(geo));
+}
+
+function mergeSourceUrls(data: Record<string, unknown>, newUrl: string): string[] {
+  const rawUrls = Array.isArray(data.sourceUrls)
+    ? data.sourceUrls
+    : typeof data.sourceUrl === "string"
+      ? [data.sourceUrl]
+      : [];
+  const existingUrls = rawUrls.filter(
+    (url): url is string => typeof url === "string" && isUsableEventUrl(url)
+  );
+  return [newUrl, ...existingUrls.filter((url) => url !== newUrl)];
+}
+
+async function updateSourceUrl(
+  ref: DocumentReference,
+  data: Record<string, unknown>,
+  newUrl: string
+): Promise<boolean> {
+  const sourceUrls = mergeSourceUrls(data, newUrl);
+  const currentUrls = Array.isArray(data.sourceUrls) ? data.sourceUrls : [];
+  if (data.sourceUrl === newUrl && JSON.stringify(currentUrls) === JSON.stringify(sourceUrls)) {
+    return false;
+  }
+  await ref.update({ sourceUrl: newUrl, sourceUrls });
+  return true;
 }
 
 async function findFuzzyDuplicate(
@@ -103,7 +130,8 @@ export async function writeScrapedEvents(
       continue;
     }
 
-    const newUrl = event.sourceUrl || null;
+    const candidateUrl = event.sourceUrl || null;
+    const newUrl = candidateUrl && isUsableEventUrl(candidateUrl) ? candidateUrl : null;
     const geo = await resolveEventLocation(event);
 
     // Exact dedup: same title + same start time
@@ -122,12 +150,9 @@ export async function writeScrapedEvents(
       const existingDoc = titleTimeMatch;
       await updateResolvedLocation(existingDoc.ref, geo);
       if (newUrl) {
-        const data = existingDoc.data();
-        const existingUrls: string[] = data.sourceUrls || (data.sourceUrl ? [data.sourceUrl] : []);
-        if (!existingUrls.includes(newUrl)) {
-          await existingDoc.ref.update({ sourceUrls: [...existingUrls, newUrl] });
+        if (await updateSourceUrl(existingDoc.ref, existingDoc.data(), newUrl)) {
           mergedCount++;
-          console.log(`Merged URL into existing (title+time): "${event.title}"`);
+          console.log(`Updated source URL (title+time): "${event.title}"`);
         } else {
           skippedExact++;
         }
@@ -150,12 +175,9 @@ export async function writeScrapedEvents(
         const existingDoc = titleLocQuery.docs[0];
         await updateResolvedLocation(existingDoc.ref, geo);
         if (newUrl) {
-          const data = existingDoc.data();
-          const existingUrls: string[] = data.sourceUrls || (data.sourceUrl ? [data.sourceUrl] : []);
-          if (!existingUrls.includes(newUrl)) {
-            await existingDoc.ref.update({ sourceUrls: [...existingUrls, newUrl] });
+          if (await updateSourceUrl(existingDoc.ref, existingDoc.data(), newUrl)) {
             mergedCount++;
-            console.log(`Merged URL into existing (title+loc): "${event.title}"`);
+            console.log(`Updated source URL (title+loc): "${event.title}"`);
           } else {
             skippedExact++;
           }
@@ -194,11 +216,9 @@ export async function writeScrapedEvents(
           const matchDoc = await matchRef.get();
           const matchData = matchDoc.data();
           if (matchData && newUrl) {
-            const existingUrls: string[] = matchData.sourceUrls || (matchData.sourceUrl ? [matchData.sourceUrl] : []);
-            if (!existingUrls.includes(newUrl)) {
-              await matchRef.update({ sourceUrls: [...existingUrls, newUrl] });
+            if (await updateSourceUrl(matchRef, matchData, newUrl)) {
               mergedCount++;
-              console.log(`Merged URL (fuzzy match): "${event.title}" → "${matchData.title}"`);
+              console.log(`Updated source URL (fuzzy match): "${event.title}" → "${matchData.title}"`);
             } else {
               skippedExact++;
               console.log(`Skipped (fuzzy, URL exists): "${event.title}"`);

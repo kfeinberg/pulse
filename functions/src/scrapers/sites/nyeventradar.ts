@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
 import { parseEventsFromText } from "../../services/parser.js";
+import { resolveEventbriteUrl } from "../../services/eventUrl.js";
 
 const BASE_URL = "https://ny-event-radar.com/";
 const SUPABASE_URL = "https://ropievbxucezuacvgpbk.supabase.co";
@@ -70,6 +71,14 @@ export function createNYEventRadarScraper(
 
       if (events.length === 0) {
         return [];
+      }
+
+      // NY Event Radar occasionally stores Eventbrite category pages or event
+      // slugs without the required numeric ticket ID. Resolve those to a
+      // canonical event-detail URL before they reach the extraction pipeline.
+      for (const event of events) {
+        if (!event.url) continue;
+        event.url = (await resolveEventbriteUrl(event.title, event.url)) || undefined;
       }
 
       // Format for Claude to categorize
