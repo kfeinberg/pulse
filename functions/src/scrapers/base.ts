@@ -4,7 +4,7 @@ export interface ScrapedEvent {
   startTimestamp: number; // Unix ms
   endTimestamp: number;   // Unix ms
   location: string;
-  category?: "popup" | "free_stuff" | "happening" | "bars" | "clubs" | "concerts";
+  category?: "popup" | "free_stuff" | "happening" | "professional" | "bars" | "clubs" | "concerts";
   sourceUrl: string;
   sourceName: string;
   latitude?: number;

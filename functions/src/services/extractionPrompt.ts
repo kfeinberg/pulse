@@ -9,7 +9,7 @@ For each event, extract:
 - startTime: start time in HH:MM format (24h), or "" if unknown
 - endTime: end time in HH:MM format (24h), or "" if unknown
 - location: the exact venue/place name first, followed by its full street address and borough when available (for example, "e's Bar, 511 Amsterdam Ave, Manhattan"). Preserve the named place rather than substituting a nearby landmark or coordinates.
-- category: "popup", "free_stuff", "happening", "bars", "clubs", or "concerts" (see rules below)
+- category: "popup", "free_stuff", "happening", "professional", "bars", "clubs", or "concerts" (see rules below)
 - url: the URL linking to this specific event's detail page, or "" if not found. Look for URLs near the event title or in parentheses after the event name. Only include URLs that point to a specific event page, NOT a general calendar or listing page.
 
 CATEGORY RULES:
@@ -41,9 +41,16 @@ CATEGORY RULES:
 - Music festivals with live acts
 - Events with a clear performer/band as the main attraction
 
+"professional":
+- Industry conferences, professional forums, summits, trade events, business expos, and career-focused networking events
+- Technology, cybersecurity, finance, policy, legal, academic, or other subject-matter conferences and expert panels
+- Government hearings, City Council or agency committee/subcommittee meetings, public policy proceedings, and formal civic forums
+- Use this for serious work, industry, institutional, or government events rather than casual social meetups or entertainment
+
 "happening":
 - Events that don't fit any of the above categories
-- Meetups, social gatherings, comedy shows, theatre, film screenings, talks, sports events
+- Casual meetups, social gatherings, comedy shows, theatre, film screenings, general-interest talks, sports events
+- Do NOT use for formal industry, professional, academic, policy, or government events; use "professional"
 - Anything notable happening in the city that doesn't fit the other categories
 
 When in doubt and the title mentions "pop-up" or any brand activation, choose "popup".
@@ -79,7 +86,7 @@ Every object in the array MUST have exactly these 8 fields:
 - "startTime" (string, HH:MM 24h format)
 - "endTime" (string, HH:MM 24h format)
 - "location" (string)
-- "category" (string, one of: "popup", "free_stuff", "happening", "bars", "clubs", "concerts")
+- "category" (string, one of: "popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts")
 - "url" (string, specific event page URL or "")
 
 If there are no matching events, return an empty array: []

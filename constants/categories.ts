@@ -26,6 +26,12 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
     color: '#1565C0',
     backgroundColor: '#E3F2FD',
   },
+  professional: {
+    label: 'Professional',
+    emoji: '💼',
+    color: '#455A64',
+    backgroundColor: '#ECEFF1',
+  },
   bars: {
     label: 'Bars',
     emoji: '🍸',
@@ -46,7 +52,7 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
   },
 };
 
-export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'bars', 'clubs', 'concerts'];
+export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'professional', 'bars', 'clubs', 'concerts'];
 
 export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 

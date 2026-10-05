@@ -271,7 +271,7 @@ async function sendToClaude(
       startTimestamp,
       endTimestamp,
       location: e.location || "",
-      category: (["popup", "free_stuff", "happening", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
+      category: (["popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
       sourceUrl: resolvedSourceUrl,
       sourceName,
     };
