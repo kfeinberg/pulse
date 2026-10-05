@@ -56,6 +56,27 @@ function getSourceHint(sourceUrl: string): string | null {
   return null;
 }
 
+function isGenericNycLocation(location: string): boolean {
+  const genericParts = new Set([
+    "new york",
+    "new york city",
+    "ny",
+    "usa",
+    "united states",
+    "manhattan",
+    "brooklyn",
+    "queens",
+    "bronx",
+    "the bronx",
+    "staten island",
+  ]);
+  const parts = location
+    .split(",")
+    .map((part) => normalize(part).replace(/\b\d{5}(?:\s\d{4})?\b/g, "").trim())
+    .filter(Boolean);
+  return parts.length > 0 && parts.every((part) => genericParts.has(part));
+}
+
 function parseLocation(location: string): {
   placeName: string | null;
   address: string | null;
@@ -176,6 +197,10 @@ export async function resolveEventLocation(
   event: ScrapedEvent
 ): Promise<ResolvedLocation | null> {
   if (!event.location.trim()) return null;
+  if (isGenericNycLocation(event.location)) {
+    console.warn(`Skipped generic NYC location without a specific place: "${event.location}"`);
+    return null;
+  }
 
   const db = getFirestore();
   const cacheRef = db.collection(CACHE_COLLECTION).doc(cacheId(event));

@@ -122,12 +122,35 @@ export function createOhMyRocknessScraper(apiKey: string): EventSource {
       );
       console.log(`Claude returned ${parsedEvents.length} categorized events`);
 
-      // Overlay coordinates and URLs from the structured data
+      // Overlay coordinates and URLs from the best structured-data match.
+      // Artist names repeat across dates and venues, so score venue and time
+      // instead of always taking the first show with the same band.
       for (const parsed of parsedEvents) {
-        const match = showsToProcess.find((show) => {
-          const bands = (show.cached_bands ?? []).map((b) => b.name?.toLowerCase() ?? "");
-          return bands.some((band) => band && parsed.title.toLowerCase().includes(band.slice(0, 15)));
-        });
+        const parsedLocation = parsed.location.toLowerCase();
+        const candidates = showsToProcess
+          .filter((show) => {
+            const bands = (show.cached_bands ?? []).map((band) => band.name?.toLowerCase() ?? "");
+            return bands.some(
+              (band) => band && parsed.title.toLowerCase().includes(band.slice(0, 15))
+            );
+          })
+          .map((show) => {
+            let score = 1;
+            const venueName = show.venue?.name?.toLowerCase();
+            const venueAddress = show.venue?.full_address?.toLowerCase().replace(/\n/g, ", ");
+            if (venueName && parsedLocation.includes(venueName)) score += 5;
+            if (venueAddress && parsedLocation.includes(venueAddress.split(",")[0])) score += 3;
+            if (show.starts_at) {
+              const timeDifference = Math.abs(
+                new Date(show.starts_at).getTime() - parsed.startTimestamp
+              );
+              if (timeDifference <= 15 * 60 * 1000) score += 5;
+              else if (timeDifference <= 24 * 60 * 60 * 1000) score += 2;
+            }
+            return { show, score };
+          })
+          .sort((a, b) => b.score - a.score);
+        const match = candidates[0]?.show;
         if (match) {
           if (match.venue?.latitude && match.venue?.longitude) {
             parsed.latitude = parseFloat(match.venue.latitude);

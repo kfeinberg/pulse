@@ -855,24 +855,6 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         <span style={styles.listToggleText}>{showListView ? '✕' : '☰'}</span>
       </div>
 
-      {/* Drop pin button */}
-      <div
-        style={{
-          ...styles.dropPinButton,
-          ...(pinDropMode ? styles.dropPinButtonActive : {}),
-        }}
-        onClick={() => {
-          if (!user) {
-            signInWithGoogle().catch(() => {});
-            return;
-          }
-          setPinDropMode((v) => !v);
-          setPendingPin(null);
-        }}
-      >
-        <span style={styles.dropPinText}>+</span>
-      </div>
-
       {/* Pin drop mode banner */}
       {pinDropMode && (
         <div style={styles.pinDropBanner}>

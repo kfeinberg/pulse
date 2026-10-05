@@ -882,22 +882,6 @@ export default function MapScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Drop pin button */}
-      <TouchableOpacity
-        style={[styles.dropPinButton, pinDropMode && styles.dropPinButtonActive]}
-        onPress={() => {
-          if (!user) {
-            router.push('/sign-in');
-            return;
-          }
-          setPinDropMode((v) => !v);
-          setPendingPin(null);
-        }}
-        activeOpacity={0.8}
-      >
-        <Text style={styles.dropPinText}>⊕</Text>
-      </TouchableOpacity>
-
       {/* Profile button */}
       {user && !selectedEvent && !selectedReport && (
         <TouchableOpacity

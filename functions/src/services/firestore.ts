@@ -29,6 +29,19 @@ async function updateResolvedLocation(
   await ref.update(resolvedLocationFields(geo));
 }
 
+function sourceUrlQuality(value: string): number {
+  try {
+    const url = new URL(value);
+    if (url.hostname.toLowerCase().endsWith("eventbrite.com")) {
+      return isUsableEventUrl(value) ? 4 : 0;
+    }
+    const pathParts = url.pathname.split("/").filter(Boolean);
+    return pathParts.length > 0 ? 3 : 1;
+  } catch {
+    return 0;
+  }
+}
+
 function mergeSourceUrls(data: Record<string, unknown>, newUrl: string): string[] {
   const rawUrls = Array.isArray(data.sourceUrls)
     ? data.sourceUrls
@@ -38,7 +51,20 @@ function mergeSourceUrls(data: Record<string, unknown>, newUrl: string): string[
   const existingUrls = rawUrls.filter(
     (url): url is string => typeof url === "string" && isUsableEventUrl(url)
   );
-  return [newUrl, ...existingUrls.filter((url) => url !== newUrl)];
+  const primaryCandidate =
+    typeof data.sourceUrl === "string" && isUsableEventUrl(data.sourceUrl)
+      ? data.sourceUrl
+      : null;
+  const bestExisting = [primaryCandidate, ...existingUrls]
+    .filter((url): url is string => Boolean(url))
+    .sort((a, b) => sourceUrlQuality(b) - sourceUrlQuality(a))[0];
+  const primary =
+    bestExisting && sourceUrlQuality(bestExisting) > sourceUrlQuality(newUrl)
+      ? bestExisting
+      : newUrl;
+  return [primary, ...[newUrl, ...existingUrls].filter((url) => url !== primary)].filter(
+    (url, index, urls) => urls.indexOf(url) === index
+  );
 }
 
 async function updateSourceUrl(
@@ -47,11 +73,12 @@ async function updateSourceUrl(
   newUrl: string
 ): Promise<boolean> {
   const sourceUrls = mergeSourceUrls(data, newUrl);
+  const sourceUrl = sourceUrls[0];
   const currentUrls = Array.isArray(data.sourceUrls) ? data.sourceUrls : [];
-  if (data.sourceUrl === newUrl && JSON.stringify(currentUrls) === JSON.stringify(sourceUrls)) {
+  if (data.sourceUrl === sourceUrl && JSON.stringify(currentUrls) === JSON.stringify(sourceUrls)) {
     return false;
   }
-  await ref.update({ sourceUrl: newUrl, sourceUrls });
+  await ref.update({ sourceUrl, sourceUrls });
   return true;
 }
 
