@@ -5,6 +5,7 @@ import { createPoshScraper } from "./sites/posh.js";
 import { createOhMyRocknessScraper } from "./sites/ohmyrockness.js";
 import { createNYEventRadarScraper } from "./sites/nyeventradar.js";
 import { createTheSkintScraper } from "./sites/theskint.js";
+import { createFieldnotesScraper } from "./sites/fieldnotes.js";
 
 // Register all event sources here.
 // To add a new source:
@@ -17,6 +18,7 @@ export function getAllSources(apiKey: string, scrapingBeeKey?: string): EventSou
     createOhMyRocknessScraper(apiKey),
     createNYEventRadarScraper(apiKey, scrapingBeeKey),
     createTheSkintScraper(apiKey),
+    createFieldnotesScraper(apiKey),
   ];
   if (scrapingBeeKey) {
     sources.push(createPoshScraper(apiKey, scrapingBeeKey));
