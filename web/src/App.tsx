@@ -21,19 +21,6 @@ const HOUR_MS = 60 * 60 * 1000;
 const MAIN_TIMELINE_HOURS = 24;
 const UPCOMING_BROWSER_HOURS = 72;
 
-function getUpcomingDayLabel(eventTime: number, now: number): string {
-  const effectiveTime = Math.max(eventTime, now);
-  const date = new Date(effectiveTime);
-  const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  const eventDay = new Date(date);
-  eventDay.setHours(0, 0, 0, 0);
-  const dayOffset = Math.round((eventDay.getTime() - today.getTime()) / (24 * HOUR_MS));
-  if (dayOffset === 0) return 'Today';
-  if (dayOffset === 1) return 'Tomorrow';
-  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
-}
-
 function formatTime(millis: number) {
   const d = new Date(millis);
   const now = new Date();
@@ -165,6 +152,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
+  const [listTimelineIndex, setListTimelineIndex] = useState(0);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem(WELCOME_KEY));
   const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
@@ -294,23 +282,6 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     markInterested(event.id, wasInterested).catch(console.warn);
   }, [interestedMap]);
 
-  const upcomingEvents = useMemo(() => {
-    const now = Date.now();
-    const horizon = now + UPCOMING_BROWSER_HOURS * HOUR_MS;
-    return allEvents
-      .filter((event) =>
-        event.endTime.toMillis() > now &&
-        event.startTime.toMillis() <= horizon &&
-        activeCategories.has(event.category)
-      )
-      .sort((a, b) => {
-        const timeDifference = a.startTime.toMillis() - b.startTime.toMillis();
-        if (timeDifference !== 0 || !userLocation) return timeDifference;
-        return getDistanceMiles(userLocation.lat, userLocation.lng, a.latitude, a.longitude) -
-          getDistanceMiles(userLocation.lat, userLocation.lng, b.latitude, b.longitude);
-      });
-  }, [allEvents, activeCategories, userLocation]);
-
   const eventsForMap = useMemo(() => {
     if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
     return [...events, selectedEvent];
@@ -353,6 +324,46 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     }
     return snaps;
   }, []);
+
+  const listTimelineSnaps = useMemo(() => {
+    const snaps: { label: string; time: Date }[] = [];
+    const now = new Date();
+    const endTime = new Date(now.getTime() + UPCOMING_BROWSER_HOURS * HOUR_MS);
+    snaps.push({ label: 'Now', time: now });
+
+    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+    const todayStart = new Date(now);
+    todayStart.setHours(0, 0, 0, 0);
+    const firstSnap = new Date(now);
+    firstSnap.setMinutes(0, 0, 0);
+    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
+
+    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * HOUR_MS)) {
+      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / (24 * HOUR_MS));
+      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
+      const h = d.getHours();
+      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+      const ampm = h < 12 ? 'AM' : 'PM';
+      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
+    }
+    return snaps;
+  }, []);
+
+  const listEvents = useMemo(() => {
+    const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
+    const filtered = allEvents.filter((event) =>
+      event.startTime.toMillis() <= selectedTime &&
+      event.endTime.toMillis() > selectedTime &&
+      activeCategories.has(event.category)
+    );
+    if (!userLocation) {
+      return filtered.sort((a, b) => a.startTime.toMillis() - b.startTime.toMillis());
+    }
+    return filtered.sort((a, b) =>
+      getDistanceMiles(userLocation.lat, userLocation.lng, a.latitude, a.longitude) -
+      getDistanceMiles(userLocation.lat, userLocation.lng, b.latitude, b.longitude)
+    );
+  }, [allEvents, activeCategories, listTimelineIndex, listTimelineSnaps, userLocation]);
 
   // Subscribe to Firestore
   useEffect(() => {
@@ -879,9 +890,22 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       {/* List toggle button */}
       <div
         style={styles.listToggleButton}
-        onClick={() => { setShowListView((v) => !v); setSelectedEvent(null); }}
+        onClick={() => {
+          if (!showListView) {
+            const mapTime = timelineSnaps[timelineIndex]?.time.getTime() ?? Date.now();
+            const closestIndex = listTimelineSnaps.reduce((bestIndex, snap, index) =>
+              Math.abs(snap.time.getTime() - mapTime) <
+              Math.abs(listTimelineSnaps[bestIndex].time.getTime() - mapTime)
+                ? index
+                : bestIndex
+            , 0);
+            setListTimelineIndex(closestIndex);
+            setSelectedEvent(null);
+          }
+          setShowListView((visible) => !visible);
+        }}
       >
-        <span style={styles.listToggleText}>{showListView ? '✕' : '📅'}</span>
+        <span style={styles.listToggleText}>{showListView ? '✕' : '☰'}</span>
       </div>
 
       {/* Pin drop mode banner */}
@@ -1040,70 +1064,80 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         </div>
       )}
 
-      {/* Three-day event browser */}
+      {/* Point-in-time event list with a 72-hour time picker */}
       {showListView && (
         <div style={styles.listPanel}>
           <div style={styles.listHeader}>
-            <span style={styles.listTitle}>Next 3 days</span>
-            <span style={styles.listSubtitle}>Happening or starting in the next 72 hours</span>
+            <span style={styles.listTitle}>
+              {listTimelineIndex === 0 ? 'Happening now' : `Happening ${listTimelineSnaps[listTimelineIndex]?.label}`}
+            </span>
+            <span style={styles.listSubtitle}>Choose any time in the next 3 days</span>
+          </div>
+          <div style={styles.listTimeScroll}>
+            {listTimelineSnaps.map((snap, index) => (
+              <div
+                key={index}
+                style={{
+                  ...styles.listTimePill,
+                  ...(index === listTimelineIndex ? styles.listTimePillActive : {}),
+                }}
+                onClick={() => setListTimelineIndex(index)}
+              >
+                <span style={{
+                  ...styles.listTimePillText,
+                  ...(index === listTimelineIndex ? styles.listTimePillTextActive : {}),
+                }}>
+                  {snap.label}
+                </span>
+              </div>
+            ))}
           </div>
           <div style={styles.listScroll}>
-            {(() => {
-              if (upcomingEvents.length === 0) {
-                return <div style={styles.listEmpty}>No events found in the next 3 days.</div>;
-              }
-              const now = Date.now();
-              let previousDay = '';
-              return upcomingEvents.map((event) => {
-                const category = CATEGORIES[event.category];
-                if (!category) return null;
-                const dayLabel = getUpcomingDayLabel(event.startTime.toMillis(), now);
-                const showDayHeader = dayLabel !== previousDay;
-                previousDay = dayLabel;
-                const happeningNow = event.startTime.toMillis() <= now && event.endTime.toMillis() > now;
-                const dist = userLocation
-                  ? getDistanceMiles(userLocation.lat, userLocation.lng, event.latitude, event.longitude)
-                  : null;
-                const distLabel = dist !== null
-                  ? dist < 0.1 ? '< 0.1 mi' : dist < 10 ? `${dist.toFixed(1)} mi` : `${Math.round(dist)} mi`
-                  : null;
-                return (
-                  <div key={event.id}>
-                    {showDayHeader && <div style={styles.listDayHeader}>{dayLabel}</div>}
-                    <div
-                      style={styles.listItem}
-                      onClick={() => {
-                        setSelectedEvent(event);
-                        setShowListView(false);
-                        setTimeout(() => {
-                          mapInstanceRef.current?.panTo({ lat: event.latitude, lng: event.longitude });
-                          mapInstanceRef.current?.setZoom(15);
-                        }, 50);
-                      }}
-                    >
-                      <div style={{ ...styles.listItemDot, backgroundColor: category.color }}>
-                        <span style={styles.listItemEmoji}>{category.emoji}</span>
-                      </div>
-                      <div style={styles.listItemContent}>
-                        <div style={styles.listItemTitle}>{event.title}</div>
-                        {event.location && (
-                          <div style={styles.listItemLocation}>{event.location}</div>
-                        )}
-                        <div style={styles.listItemMeta}>
-                          {happeningNow ? 'Happening now' : formatTime(event.startTime.toMillis())}
-                          {distLabel && (
-                            <span style={styles.listItemDistance}> · {distLabel}</span>
-                          )}
-                        </div>
-                      </div>
-                      {(event.interested ?? 0) > 0 && (
-                        <span style={styles.listItemInterested}>⭐ {event.interested}</span>
+            {listEvents.length === 0 ? (
+              <div style={styles.listEmpty}>No events are happening at this time.</div>
+            ) : listEvents.map((event) => {
+              const category = CATEGORIES[event.category];
+              if (!category) return null;
+              const dist = userLocation
+                ? getDistanceMiles(userLocation.lat, userLocation.lng, event.latitude, event.longitude)
+                : null;
+              const distLabel = dist !== null
+                ? dist < 0.1 ? '< 0.1 mi' : dist < 10 ? `${dist.toFixed(1)} mi` : `${Math.round(dist)} mi`
+                : null;
+              return (
+                <div
+                  key={event.id}
+                  style={styles.listItem}
+                  onClick={() => {
+                    setSelectedEvent(event);
+                    setShowListView(false);
+                    setTimeout(() => {
+                      mapInstanceRef.current?.panTo({ lat: event.latitude, lng: event.longitude });
+                      mapInstanceRef.current?.setZoom(15);
+                    }, 50);
+                  }}
+                >
+                  <div style={{ ...styles.listItemDot, backgroundColor: category.color }}>
+                    <span style={styles.listItemEmoji}>{category.emoji}</span>
+                  </div>
+                  <div style={styles.listItemContent}>
+                    <div style={styles.listItemTitle}>{event.title}</div>
+                    {event.location && (
+                      <div style={styles.listItemLocation}>{event.location}</div>
+                    )}
+                    <div style={styles.listItemMeta}>
+                      {formatTime(event.startTime.toMillis())}
+                      {distLabel && (
+                        <span style={styles.listItemDistance}> · {distLabel}</span>
                       )}
                     </div>
                   </div>
-                );
-              });
-            })()}
+                  {(event.interested ?? 0) > 0 && (
+                    <span style={styles.listItemInterested}>⭐ {event.interested}</span>
+                  )}
+                </div>
+              );
+            })}
           </div>
         </div>
       )}
@@ -1969,14 +2003,34 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#777',
     marginTop: 3,
   },
-  listDayHeader: {
-    padding: '14px 20px 8px',
-    backgroundColor: '#f8f8f8',
-    color: '#666',
+  listTimeScroll: {
+    display: 'flex',
+    flexDirection: 'row',
+    gap: 8,
+    padding: '10px 14px',
+    overflowX: 'auto' as any,
+    flexShrink: 0,
+    borderBottom: '1px solid #eee',
+  },
+  listTimePill: {
+    padding: '8px 12px',
+    borderRadius: 16,
+    backgroundColor: '#f0f0f0',
+    color: '#555',
+    cursor: 'pointer',
+    flexShrink: 0,
+    whiteSpace: 'nowrap' as const,
+  },
+  listTimePillActive: {
+    backgroundColor: '#1a1a1a',
+  },
+  listTimePillText: {
     fontSize: 12,
-    fontWeight: 700,
-    letterSpacing: '0.8px',
-    textTransform: 'uppercase' as const,
+    fontWeight: 600,
+    color: '#555',
+  },
+  listTimePillTextActive: {
+    color: '#fff',
   },
   listEmpty: {
     padding: '42px 28px',
