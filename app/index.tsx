@@ -17,6 +17,27 @@ const HOUR_MS = 60 * 60 * 1000;
 const MAIN_TIMELINE_HOURS = 24;
 const UPCOMING_BROWSER_HOURS = 72;
 
+function getDateKey(time: Date): string {
+  return `${time.getFullYear()}-${time.getMonth()}-${time.getDate()}`;
+}
+
+function formatBrowseDay(time: Date, now: Date): string {
+  const day = new Date(time);
+  day.setHours(0, 0, 0, 0);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (day.getTime() === today.getTime()) return 'Today';
+  if (day.getTime() === tomorrow.getTime()) return 'Tomorrow';
+  return time.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function formatBrowseTime(time: Date, isNow: boolean): string {
+  if (isNow) return 'Now';
+  return time.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
   live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
   free_stuff: { emoji: '🎁', label: 'Free Stuff', color: '#2ecc71' },
@@ -54,6 +75,7 @@ export default function MapScreen() {
   const [timelineVisualIndex, setTimelineVisualIndex] = useState(0);
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
+  const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
   const [trackWidth, setTrackWidth] = useState(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterAnim = useRef(new Animated.Value(0)).current;
@@ -230,6 +252,34 @@ export default function MapScreen() {
     }
     return snaps;
   }, []);
+
+  const listDayOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const now = listTimelineSnaps[0].time;
+    return listTimelineSnaps.reduce<Array<{ key: string; label: string; firstIndex: number }>>(
+      (options, snap, index) => {
+        const key = getDateKey(snap.time);
+        if (!seen.has(key)) {
+          seen.add(key);
+          options.push({ key, label: formatBrowseDay(snap.time, now), firstIndex: index });
+        }
+        return options;
+      },
+      []
+    );
+  }, [listTimelineSnaps]);
+
+  const selectedListDayKey = getDateKey(listTimelineSnaps[listTimelineIndex].time);
+  const listTimeOptions = useMemo(() =>
+    listTimelineSnaps
+      .map((snap, index) => ({
+        index,
+        label: formatBrowseTime(snap.time, index === 0),
+        dayKey: getDateKey(snap.time),
+      }))
+      .filter((option) => option.dayKey === selectedListDayKey),
+    [listTimelineSnaps, selectedListDayKey]
+  );
 
   const timelineTrackRef = useRef<View>(null);
   const timelineTrackX = useRef(0);
@@ -793,31 +843,34 @@ export default function MapScreen() {
               <Text style={styles.listClose}>✕</Text>
             </TouchableOpacity>
           </View>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            style={styles.listTimeScroll}
-            contentContainerStyle={styles.listTimeContent}
-          >
-            {listTimelineSnaps.map((snap, index) => (
-              <TouchableOpacity
-                key={index}
-                style={[
-                  styles.listTimePill,
-                  index === listTimelineIndex && styles.listTimePillActive,
-                ]}
-                onPress={() => setListTimelineIndex(index)}
-                activeOpacity={0.75}
-              >
-                <Text style={[
-                  styles.listTimePillText,
-                  index === listTimelineIndex && styles.listTimePillTextActive,
-                ]}>
-                  {snap.label}
+          <View style={styles.listTimeControls}>
+            <TouchableOpacity
+              style={styles.listSelect}
+              onPress={() => setListPickerOpen('day')}
+              activeOpacity={0.75}
+            >
+              <Text style={styles.listSelectLabel}>Day</Text>
+              <View style={styles.listSelectValueRow}>
+                <Text style={styles.listSelectValue}>
+                  {listDayOptions.find((option) => option.key === selectedListDayKey)?.label}
                 </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
+                <Text style={styles.listSelectChevron}>⌄</Text>
+              </View>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.listSelect}
+              onPress={() => setListPickerOpen('time')}
+              activeOpacity={0.75}
+            >
+              <Text style={styles.listSelectLabel}>Time</Text>
+              <View style={styles.listSelectValueRow}>
+                <Text style={styles.listSelectValue}>
+                  {formatBrowseTime(listTimelineSnaps[listTimelineIndex].time, listTimelineIndex === 0)}
+                </Text>
+                <Text style={styles.listSelectChevron}>⌄</Text>
+              </View>
+            </TouchableOpacity>
+          </View>
           <ScrollView style={styles.listScroll}>
             {listEvents.length === 0 ? (
               <Text style={styles.listEmpty}>No events are happening at this time.</Text>
@@ -871,6 +924,60 @@ export default function MapScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      <Modal
+        visible={listPickerOpen !== null}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setListPickerOpen(null)}
+      >
+        <TouchableOpacity
+          style={styles.listPickerBackdrop}
+          activeOpacity={1}
+          onPress={() => setListPickerOpen(null)}
+        >
+          <View style={styles.listPickerCard} onStartShouldSetResponder={() => true}>
+            <Text style={styles.listPickerTitle}>
+              {listPickerOpen === 'day' ? 'Choose a day' : 'Choose a time'}
+            </Text>
+            <ScrollView style={styles.listPickerOptions}>
+              {(listPickerOpen === 'day'
+                ? listDayOptions.map((option) => ({
+                    label: option.label,
+                    index: option.firstIndex,
+                    selected: option.key === selectedListDayKey,
+                  }))
+                : listTimeOptions.map((option) => ({
+                    label: option.label,
+                    index: option.index,
+                    selected: option.index === listTimelineIndex,
+                  }))
+              ).map((option) => (
+                <TouchableOpacity
+                  key={`${listPickerOpen}-${option.index}`}
+                  style={[
+                    styles.listPickerOption,
+                    option.selected && styles.listPickerOptionSelected,
+                  ]}
+                  onPress={() => {
+                    setListTimelineIndex(option.index);
+                    setListPickerOpen(null);
+                  }}
+                  activeOpacity={0.7}
+                >
+                  <Text style={[
+                    styles.listPickerOptionText,
+                    option.selected && styles.listPickerOptionTextSelected,
+                  ]}>
+                    {option.label}
+                  </Text>
+                  {option.selected && <Text style={styles.listPickerCheck}>✓</Text>}
+                </TouchableOpacity>
+              ))}
+            </ScrollView>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       {/* Selected report card */}
       {selectedReport && (
@@ -1491,33 +1598,97 @@ const styles = StyleSheet.create({
     color: '#777',
     marginTop: 3,
   },
-  listTimeScroll: {
-    flexGrow: 0,
-    maxHeight: 58,
+  listTimeControls: {
+    flexDirection: 'row',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
-  listTimeContent: {
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    gap: 8,
-  },
-  listTimePill: {
-    paddingVertical: 8,
+  listSelect: {
+    flex: 1,
+    borderWidth: 1,
+    borderColor: '#ddd',
+    borderRadius: 12,
+    paddingVertical: 9,
     paddingHorizontal: 12,
-    borderRadius: 16,
-    backgroundColor: '#f0f0f0',
+    backgroundColor: '#fafafa',
   },
-  listTimePillActive: {
-    backgroundColor: '#1a1a1a',
+  listSelectLabel: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#888',
+    textTransform: 'uppercase',
+    letterSpacing: 0.7,
+    marginBottom: 2,
   },
-  listTimePillText: {
-    fontSize: 12,
+  listSelectValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  listSelectValue: {
+    fontSize: 14,
     fontWeight: '600',
-    color: '#555',
+    color: '#222',
   },
-  listTimePillTextActive: {
-    color: '#fff',
+  listSelectChevron: {
+    fontSize: 16,
+    color: '#777',
+    marginLeft: 6,
+  },
+  listPickerBackdrop: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.35)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  listPickerCard: {
+    width: '100%',
+    maxWidth: 340,
+    maxHeight: '70%',
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingTop: 20,
+    overflow: 'hidden',
+  },
+  listPickerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a1a1a',
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+  },
+  listPickerOptions: {
+    borderTopWidth: 1,
+    borderTopColor: '#eee',
+  },
+  listPickerOption: {
+    minHeight: 50,
+    paddingHorizontal: 20,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    borderBottomWidth: 1,
+    borderBottomColor: '#f0f0f0',
+  },
+  listPickerOptionSelected: {
+    backgroundColor: '#f0f5ff',
+  },
+  listPickerOptionText: {
+    fontSize: 16,
+    color: '#333',
+  },
+  listPickerOptionTextSelected: {
+    color: '#2a7cff',
+    fontWeight: '700',
+  },
+  listPickerCheck: {
+    color: '#2a7cff',
+    fontSize: 17,
+    fontWeight: '700',
   },
   listEmpty: {
     fontSize: 15,

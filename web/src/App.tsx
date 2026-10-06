@@ -21,6 +21,27 @@ const HOUR_MS = 60 * 60 * 1000;
 const MAIN_TIMELINE_HOURS = 24;
 const UPCOMING_BROWSER_HOURS = 72;
 
+function getDateKey(time: Date): string {
+  return `${time.getFullYear()}-${time.getMonth()}-${time.getDate()}`;
+}
+
+function formatBrowseDay(time: Date, now: Date): string {
+  const day = new Date(time);
+  day.setHours(0, 0, 0, 0);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const tomorrow = new Date(today);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  if (day.getTime() === today.getTime()) return 'Today';
+  if (day.getTime() === tomorrow.getTime()) return 'Tomorrow';
+  return time.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
+}
+
+function formatBrowseTime(time: Date, isNow: boolean): string {
+  if (isNow) return 'Now';
+  return time.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
+}
+
 function formatTime(millis: number) {
   const d = new Date(millis);
   const now = new Date();
@@ -348,6 +369,34 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     }
     return snaps;
   }, []);
+
+  const listDayOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const now = listTimelineSnaps[0].time;
+    return listTimelineSnaps.reduce<Array<{ key: string; label: string; firstIndex: number }>>(
+      (options, snap, index) => {
+        const key = getDateKey(snap.time);
+        if (!seen.has(key)) {
+          seen.add(key);
+          options.push({ key, label: formatBrowseDay(snap.time, now), firstIndex: index });
+        }
+        return options;
+      },
+      []
+    );
+  }, [listTimelineSnaps]);
+
+  const selectedListDayKey = getDateKey(listTimelineSnaps[listTimelineIndex].time);
+  const listTimeOptions = useMemo(() =>
+    listTimelineSnaps
+      .map((snap, index) => ({
+        index,
+        label: formatBrowseTime(snap.time, index === 0),
+        dayKey: getDateKey(snap.time),
+      }))
+      .filter((option) => option.dayKey === selectedListDayKey),
+    [listTimelineSnaps, selectedListDayKey]
+  );
 
   const listEvents = useMemo(() => {
     const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
@@ -1073,24 +1122,36 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
             </span>
             <span style={styles.listSubtitle}>Choose any time in the next 3 days</span>
           </div>
-          <div style={styles.listTimeScroll}>
-            {listTimelineSnaps.map((snap, index) => (
-              <div
-                key={index}
-                style={{
-                  ...styles.listTimePill,
-                  ...(index === listTimelineIndex ? styles.listTimePillActive : {}),
+          <div style={styles.listTimeControls}>
+            <label style={styles.listSelectField}>
+              <span style={styles.listSelectLabel}>Day</span>
+              <select
+                aria-label="Choose day"
+                style={styles.listSelect}
+                value={selectedListDayKey}
+                onChange={(event) => {
+                  const option = listDayOptions.find((day) => day.key === event.target.value);
+                  if (option) setListTimelineIndex(option.firstIndex);
                 }}
-                onClick={() => setListTimelineIndex(index)}
               >
-                <span style={{
-                  ...styles.listTimePillText,
-                  ...(index === listTimelineIndex ? styles.listTimePillTextActive : {}),
-                }}>
-                  {snap.label}
-                </span>
-              </div>
-            ))}
+                {listDayOptions.map((option) => (
+                  <option key={option.key} value={option.key}>{option.label}</option>
+                ))}
+              </select>
+            </label>
+            <label style={styles.listSelectField}>
+              <span style={styles.listSelectLabel}>Time</span>
+              <select
+                aria-label="Choose time"
+                style={styles.listSelect}
+                value={listTimelineIndex}
+                onChange={(event) => setListTimelineIndex(Number(event.target.value))}
+              >
+                {listTimeOptions.map((option) => (
+                  <option key={option.index} value={option.index}>{option.label}</option>
+                ))}
+              </select>
+            </label>
           </div>
           <div style={styles.listScroll}>
             {listEvents.length === 0 ? (
@@ -2003,34 +2064,38 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#777',
     marginTop: 3,
   },
-  listTimeScroll: {
+  listTimeControls: {
     display: 'flex',
     flexDirection: 'row',
-    gap: 8,
+    gap: 10,
     padding: '10px 14px',
-    overflowX: 'auto' as any,
     flexShrink: 0,
     borderBottom: '1px solid #eee',
   },
-  listTimePill: {
-    padding: '8px 12px',
-    borderRadius: 16,
-    backgroundColor: '#f0f0f0',
-    color: '#555',
-    cursor: 'pointer',
-    flexShrink: 0,
-    whiteSpace: 'nowrap' as const,
+  listSelectField: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 3,
+    flex: 1,
+    minWidth: 0,
   },
-  listTimePillActive: {
-    backgroundColor: '#1a1a1a',
+  listSelectLabel: {
+    fontSize: 10,
+    fontWeight: 700,
+    color: '#888',
+    textTransform: 'uppercase' as const,
+    letterSpacing: '0.7px',
   },
-  listTimePillText: {
-    fontSize: 12,
+  listSelect: {
+    width: '100%',
+    border: '1px solid #ddd',
+    borderRadius: 10,
+    padding: '9px 10px',
+    backgroundColor: '#fafafa',
+    color: '#222',
+    fontSize: 14,
     fontWeight: 600,
-    color: '#555',
-  },
-  listTimePillTextActive: {
-    color: '#fff',
+    cursor: 'pointer',
   },
   listEmpty: {
     padding: '42px 28px',
