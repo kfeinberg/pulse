@@ -72,6 +72,7 @@ export default function MapScreen() {
   const [showListView, setShowListView] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
   const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
+  const [mapPickerStep, setMapPickerStep] = useState<'main' | 'day' | 'time'>('main');
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterAnim = useRef(new Animated.Value(0)).current;
@@ -716,6 +717,7 @@ export default function MapScreen() {
         style={styles.mapTimeButton}
         onPress={() => {
           setShowListView(false);
+          setMapPickerStep('main');
           setMapTimePickerOpen(true);
         }}
         activeOpacity={0.8}
@@ -839,59 +841,116 @@ export default function MapScreen() {
         visible={mapTimePickerOpen}
         transparent
         animationType="fade"
-        onRequestClose={() => setMapTimePickerOpen(false)}
+        onRequestClose={() => {
+          setMapPickerStep('main');
+          setMapTimePickerOpen(false);
+        }}
       >
-        <TouchableOpacity
-          style={styles.listPickerBackdrop}
-          activeOpacity={1}
-          onPress={() => setMapTimePickerOpen(false)}
-        >
-          <View style={styles.mapPickerCard} onStartShouldSetResponder={() => true}>
-            <Text style={styles.listPickerTitle}>Choose date and time</Text>
-            <Text style={styles.mapPickerSubtitle}>Show events happening at a specific time.</Text>
-            <View style={styles.listTimeControls}>
-              <TouchableOpacity
-                style={styles.listSelect}
-                onPress={() => setListPickerOpen('day')}
-                activeOpacity={0.75}
-              >
-                <Text style={styles.listSelectLabel}>Day</Text>
-                <View style={styles.listSelectValueRow}>
-                  <Text style={styles.listSelectValue}>
-                    {listDayOptions.find((option) => option.key === selectedListDayKey)?.label}
-                  </Text>
-                  <Text style={styles.listSelectChevron}>⌄</Text>
+        <View style={styles.listPickerBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => {
+              setMapPickerStep('main');
+              setMapTimePickerOpen(false);
+            }}
+          />
+          <View style={styles.mapPickerCard}>
+            {mapPickerStep === 'main' ? (
+              <>
+                <Text style={styles.listPickerTitle}>Choose date and time</Text>
+                <Text style={styles.mapPickerSubtitle}>Show events happening at a specific time.</Text>
+                <View style={styles.listTimeControls}>
+                  <TouchableOpacity
+                    style={styles.listSelect}
+                    onPress={() => setMapPickerStep('day')}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={styles.listSelectLabel}>Day</Text>
+                    <View style={styles.listSelectValueRow}>
+                      <Text style={styles.listSelectValue}>
+                        {listDayOptions.find((option) => option.key === selectedListDayKey)?.label}
+                      </Text>
+                      <Text style={styles.listSelectChevron}>⌄</Text>
+                    </View>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.listSelect}
+                    onPress={() => setMapPickerStep('time')}
+                    activeOpacity={0.75}
+                  >
+                    <Text style={styles.listSelectLabel}>Time</Text>
+                    <View style={styles.listSelectValueRow}>
+                      <Text style={styles.listSelectValue}>
+                        {formatBrowseTime(listTimelineSnaps[listTimelineIndex].time, listTimelineIndex === 0)}
+                      </Text>
+                      <Text style={styles.listSelectChevron}>⌄</Text>
+                    </View>
+                  </TouchableOpacity>
                 </View>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.listSelect}
-                onPress={() => setListPickerOpen('time')}
-                activeOpacity={0.75}
-              >
-                <Text style={styles.listSelectLabel}>Time</Text>
-                <View style={styles.listSelectValueRow}>
-                  <Text style={styles.listSelectValue}>
-                    {formatBrowseTime(listTimelineSnaps[listTimelineIndex].time, listTimelineIndex === 0)}
-                  </Text>
-                  <Text style={styles.listSelectChevron}>⌄</Text>
+                <View style={styles.mapPickerActions}>
+                  {listTimelineIndex !== 0 && (
+                    <TouchableOpacity style={styles.mapPickerNowButton} onPress={resetMapTime}>
+                      <Text style={styles.mapPickerNowText}>Back to now</Text>
+                    </TouchableOpacity>
+                  )}
+                  <TouchableOpacity
+                    style={styles.mapPickerDoneButton}
+                    onPress={() => setMapTimePickerOpen(false)}
+                  >
+                    <Text style={styles.mapPickerDoneText}>Done</Text>
+                  </TouchableOpacity>
                 </View>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.mapPickerActions}>
-              {listTimelineIndex !== 0 && (
-                <TouchableOpacity style={styles.mapPickerNowButton} onPress={resetMapTime}>
-                  <Text style={styles.mapPickerNowText}>Back to now</Text>
-                </TouchableOpacity>
-              )}
-              <TouchableOpacity
-                style={styles.mapPickerDoneButton}
-                onPress={() => setMapTimePickerOpen(false)}
-              >
-                <Text style={styles.mapPickerDoneText}>Done</Text>
-              </TouchableOpacity>
-            </View>
+              </>
+            ) : (
+              <>
+                <View style={styles.mapPickerHeader}>
+                  <TouchableOpacity onPress={() => setMapPickerStep('main')}>
+                    <Text style={styles.mapPickerBack}>‹</Text>
+                  </TouchableOpacity>
+                  <Text style={styles.mapPickerStepTitle}>
+                    {mapPickerStep === 'day' ? 'Choose a day' : 'Choose a time'}
+                  </Text>
+                </View>
+                <ScrollView style={styles.listPickerOptions}>
+                  {(mapPickerStep === 'day'
+                    ? listDayOptions.map((option) => ({
+                        label: option.label,
+                        index: option.firstIndex,
+                        selected: option.key === selectedListDayKey,
+                      }))
+                    : listTimeOptions.map((option) => ({
+                        label: option.label,
+                        index: option.index,
+                        selected: option.index === listTimelineIndex,
+                      }))
+                  ).map((option) => (
+                    <TouchableOpacity
+                      key={`${mapPickerStep}-${option.index}`}
+                      style={[
+                        styles.listPickerOption,
+                        option.selected && styles.listPickerOptionSelected,
+                      ]}
+                      onPress={() => {
+                        applyListTimeIndex(option.index);
+                        setMapPickerStep('main');
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <Text style={[
+                        styles.listPickerOptionText,
+                        option.selected && styles.listPickerOptionTextSelected,
+                      ]}>
+                        {option.label}
+                      </Text>
+                      {option.selected && <Text style={styles.listPickerCheck}>✓</Text>}
+                    </TouchableOpacity>
+                  ))}
+                </ScrollView>
+              </>
+            )}
           </View>
-        </TouchableOpacity>
+        </View>
       </Modal>
 
       <Modal
@@ -900,12 +959,13 @@ export default function MapScreen() {
         animationType="fade"
         onRequestClose={() => setListPickerOpen(null)}
       >
-        <TouchableOpacity
-          style={styles.listPickerBackdrop}
-          activeOpacity={1}
-          onPress={() => setListPickerOpen(null)}
-        >
-          <View style={styles.listPickerCard} onStartShouldSetResponder={() => true}>
+        <View style={styles.listPickerBackdrop}>
+          <TouchableOpacity
+            style={StyleSheet.absoluteFill}
+            activeOpacity={1}
+            onPress={() => setListPickerOpen(null)}
+          />
+          <View style={styles.listPickerCard}>
             <Text style={styles.listPickerTitle}>
               {listPickerOpen === 'day' ? 'Choose a day' : 'Choose a time'}
             </Text>
@@ -945,7 +1005,7 @@ export default function MapScreen() {
               ))}
             </ScrollView>
           </View>
-        </TouchableOpacity>
+        </View>
       </Modal>
 
       {/* Selected report card */}
@@ -1596,6 +1656,25 @@ const styles = StyleSheet.create({
     color: '#777',
     paddingHorizontal: 20,
     paddingBottom: 12,
+  },
+  mapPickerHeader: {
+    minHeight: 58,
+    flexDirection: 'row',
+    alignItems: 'center',
+    borderBottomWidth: 1,
+    borderBottomColor: '#eee',
+    paddingHorizontal: 14,
+  },
+  mapPickerBack: {
+    width: 38,
+    fontSize: 34,
+    lineHeight: 38,
+    color: '#444',
+  },
+  mapPickerStepTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1a1a1a',
   },
   mapPickerActions: {
     flexDirection: 'row',
