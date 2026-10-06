@@ -210,9 +210,9 @@ export default function MapScreen() {
     todayStart.setHours(0, 0, 0, 0);
     const firstSnap = new Date(now);
     firstSnap.setMinutes(0, 0, 0);
-    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
+    firstSnap.setHours(firstSnap.getHours() + 1);
 
-    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * HOUR_MS)) {
+    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + HOUR_MS)) {
       const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / (24 * HOUR_MS));
       const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
       const h = d.getHours();
