@@ -18,7 +18,6 @@ const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; 
 const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
 const WELCOME_KEY = 'pulse_welcomed';
 const HOUR_MS = 60 * 60 * 1000;
-const MAIN_TIMELINE_HOURS = 24;
 const UPCOMING_BROWSER_HOURS = 72;
 
 function getDateKey(time: Date): string {
@@ -171,10 +170,8 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
-  const [timelineIndex, setTimelineIndex] = useState(0);
-  const [mapSelectedTime, setMapSelectedTime] = useState(() => Date.now());
-  const [timelineOpen, setTimelineOpen] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
+  const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem(WELCOME_KEY));
   const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
@@ -199,7 +196,6 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [flagMenuTarget, setFlagMenuTarget] = useState<{ type: 'comment' | 'report'; id: string; eventId?: string } | null>(null);
   const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
   const [showProfileMenu, setShowProfileMenu] = useState(false);
-  const trackRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<google.maps.Map | null>(null);
 
   // Load votes and interested from localStorage
@@ -321,32 +317,6 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     });
   }, []);
 
-  // Main-screen timeline snaps — every 2 hours for the next 24 hours
-  const timelineSnaps = useMemo(() => {
-    const snaps: { label: string; time: Date }[] = [];
-    const now = new Date();
-    const endTime = new Date(now.getTime() + MAIN_TIMELINE_HOURS * HOUR_MS);
-    snaps.push({ label: 'Now', time: now });
-
-    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-
-    const firstSnap = new Date(now);
-    firstSnap.setMinutes(0, 0, 0);
-    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
-
-    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * 60 * 60 * 1000)) {
-      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / 86400000);
-      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
-      const h = d.getHours();
-      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-      const ampm = h < 12 ? 'AM' : 'PM';
-      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
-    }
-    return snaps;
-  }, []);
-
   const listTimelineSnaps = useMemo(() => {
     const snaps: { label: string; time: Date }[] = [];
     const now = new Date();
@@ -399,22 +369,12 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     [listTimelineSnaps, selectedListDayKey]
   );
 
-  const applyListTimeIndex = useCallback((index: number) => {
-    const selectedTime = listTimelineSnaps[index].time.getTime();
-    setListTimelineIndex(index);
-    setMapSelectedTime(selectedTime);
-    setTimelineOpen(false);
+  const mapSelectedTime = listTimelineSnaps[listTimelineIndex].time.getTime();
 
-    if (selectedTime <= timelineSnaps[timelineSnaps.length - 1].time.getTime()) {
-      const closestIndex = timelineSnaps.reduce((bestIndex, snap, snapIndex) =>
-        Math.abs(snap.time.getTime() - selectedTime) <
-        Math.abs(timelineSnaps[bestIndex].time.getTime() - selectedTime)
-          ? snapIndex
-          : bestIndex
-      , 0);
-      setTimelineIndex(closestIndex);
-    }
-  }, [listTimelineSnaps, timelineSnaps]);
+  const applyListTimeIndex = useCallback((index: number) => {
+    setListTimelineIndex(index);
+    setSelectedEvent(null);
+  }, []);
 
   const listEvents = useMemo(() => {
     const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
@@ -467,42 +427,9 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     });
   }, [allEvents, mapSelectedTime, activeCategories]);
 
-  const handleTimelineDrag = useCallback((e: React.MouseEvent | React.TouchEvent) => {
-    if (!trackRef.current) return;
-    const rect = trackRef.current.getBoundingClientRect();
-    const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
-    const fraction = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const rawIndex = fraction * (timelineSnaps.length - 1);
-    // Snap to "Now" (index 0) more easily to prevent flickering
-    const index = rawIndex < 0.8 ? 0 : Math.round(rawIndex);
-    setTimelineIndex(index);
-    setMapSelectedTime(timelineSnaps[index].time.getTime());
-  }, [timelineSnaps]);
-
-  const handleTrackMouseDown = useCallback((e: React.MouseEvent) => {
-    handleTimelineDrag(e);
-    const onMove = (ev: MouseEvent) => handleTimelineDrag(ev as any);
-    const onUp = () => {
-      window.removeEventListener('mousemove', onMove);
-      window.removeEventListener('mouseup', onUp);
-    };
-    window.addEventListener('mousemove', onMove);
-    window.addEventListener('mouseup', onUp);
-  }, [handleTimelineDrag]);
-
-  const handleTrackTouchStart = useCallback((e: React.TouchEvent) => {
-    handleTimelineDrag(e);
-  }, [handleTimelineDrag]);
-
-  const isFutureTimeline =
-    mapSelectedTime > timelineSnaps[timelineSnaps.length - 1].time.getTime();
-
-  const resetMapTimeline = () => {
-    setTimelineIndex(0);
-    setListTimelineIndex(0);
-    setMapSelectedTime(timelineSnaps[0].time.getTime());
-    setTimelineOpen(false);
-    setSelectedEvent(null);
+  const resetMapTime = () => {
+    applyListTimeIndex(0);
+    setMapTimePickerOpen(false);
   };
 
   if (!isLoaded) {
@@ -524,7 +451,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
           }
           setSelectedEvent(null);
           setSelectedReport(null);
-          setTimelineOpen(false);
+          setMapTimePickerOpen(false);
           setFiltersOpen(false);
           setShowProfileMenu(false);
           setShowListView(false);
@@ -925,74 +852,77 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         </div>
       )}
 
-      {/* Timeline bar */}
-      {isFutureTimeline ? (
-        <div style={styles.futureTimelineBar}>
-          <div style={styles.futureTimelineInfo}>
-            <span style={styles.futureTimelineBadge}>FUTURE</span>
-            <span style={styles.futureTimelineTime}>{formatTime(mapSelectedTime)}</span>
-          </div>
-          <button style={styles.futureTimelineReset} onClick={resetMapTimeline}>
-            Back to now
-          </button>
-        </div>
-      ) : (
-        <div style={{
-          ...styles.timelineBar,
-          ...(timelineOpen ? {} : { right: 'auto' }),
-        }}>
+      {!showListView && (
+        <>
           <div
-            style={styles.timelinePill}
-            onClick={() => setTimelineOpen((v) => !v)}
+            style={styles.mapTimeButton}
+            onClick={() => setMapTimePickerOpen((open) => !open)}
           >
-            <div style={styles.timelinePillDot} />
-            <span style={{ ...styles.timelinePillText, ...(timelineOpen ? { minWidth: 72 } : {}) }}>
-              {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
-            </span>
+            <div>
+              <div style={styles.mapTimeLabel}>WHEN</div>
+              <div style={styles.mapTimeValue}>
+                {listTimelineIndex === 0 ? 'Now' : formatTime(mapSelectedTime)}
+              </div>
+            </div>
+            <span style={styles.mapTimeChevron}>⌄</span>
           </div>
-          {timelineOpen && (
-            <div
-              ref={trackRef}
-              style={styles.timelineTrack}
-              onMouseDown={handleTrackMouseDown}
-              onTouchStart={handleTrackTouchStart}
-              onTouchMove={handleTimelineDrag}
-            >
-              <div style={styles.trackLine} />
-              {timelineSnaps.map((snap, i) => {
-                const isActive = i === timelineIndex;
-                const pct = (i / (timelineSnaps.length - 1)) * 100;
-                return (
-                  <div key={i} style={{ ...styles.dotWrapper, left: `${pct}%` }}>
-                    <div
-                      style={{
-                        ...styles.dot,
-                        ...(isActive ? styles.dotActive : {}),
-                      }}
-                    />
-                  </div>
-                );
-              })}
+          {mapTimePickerOpen && (
+            <div style={styles.mapTimePanel} onClick={(event) => event.stopPropagation()}>
+              <div style={styles.mapTimePanelTitle}>Choose date and time</div>
+              <div style={styles.mapTimePanelSubtitle}>Show events happening at a specific time.</div>
+              <div style={styles.listTimeControls}>
+                <label style={styles.listSelectField}>
+                  <span style={styles.listSelectLabel}>Day</span>
+                  <select
+                    aria-label="Choose day"
+                    style={styles.listSelect}
+                    value={selectedListDayKey}
+                    onChange={(event) => {
+                      const option = listDayOptions.find((day) => day.key === event.target.value);
+                      if (option) applyListTimeIndex(option.firstIndex);
+                    }}
+                  >
+                    {listDayOptions.map((option) => (
+                      <option key={option.key} value={option.key}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+                <label style={styles.listSelectField}>
+                  <span style={styles.listSelectLabel}>Time</span>
+                  <select
+                    aria-label="Choose time"
+                    style={styles.listSelect}
+                    value={listTimelineIndex}
+                    onChange={(event) => applyListTimeIndex(Number(event.target.value))}
+                  >
+                    {listTimeOptions.map((option) => (
+                      <option key={option.index} value={option.index}>{option.label}</option>
+                    ))}
+                  </select>
+                </label>
+              </div>
+              <div style={styles.mapTimePanelActions}>
+                {listTimelineIndex !== 0 && (
+                  <button style={styles.mapTimeNowButton} onClick={resetMapTime}>Back to now</button>
+                )}
+                <button
+                  style={styles.mapTimeDoneButton}
+                  onClick={() => setMapTimePickerOpen(false)}
+                >
+                  Done
+                </button>
+              </div>
             </div>
           )}
-        </div>
+        </>
       )}
 
       {/* List toggle button */}
       <div
         style={styles.listToggleButton}
         onClick={() => {
-          if (!showListView) {
-            const mapTime = mapSelectedTime;
-            const closestIndex = listTimelineSnaps.reduce((bestIndex, snap, index) =>
-              Math.abs(snap.time.getTime() - mapTime) <
-              Math.abs(listTimelineSnaps[bestIndex].time.getTime() - mapTime)
-                ? index
-                : bestIndex
-            , 0);
-            setListTimelineIndex(closestIndex);
-            setSelectedEvent(null);
-          }
+          setMapTimePickerOpen(false);
+          if (!showListView) setSelectedEvent(null);
           setShowListView((visible) => !visible);
         }}
       >
@@ -1574,119 +1504,90 @@ const styles: Record<string, React.CSSProperties> = {
     lineHeight: '20px',
     color: '#444',
   },
-  timelineBar: {
+  mapTimeButton: {
     position: 'absolute',
     bottom: 16,
     left: 16,
-    right: '30%',
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 22,
-    padding: '0 6px 0 0',
-    gap: 0,
-    userSelect: 'none',
-  },
-  futureTimelineBar: {
-    position: 'absolute',
-    bottom: 16,
-    left: 16,
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 18,
+    minWidth: 150,
     minHeight: 48,
-    backgroundColor: 'rgba(30, 30, 30, 0.92)',
-    borderRadius: 16,
-    padding: '8px 8px 8px 12px',
-    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
-  },
-  futureTimelineInfo: {
     display: 'flex',
-    flexDirection: 'column',
-    gap: 2,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
+    borderRadius: 16,
+    padding: '8px 13px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+    cursor: 'pointer',
+    zIndex: 3,
   },
-  futureTimelineBadge: {
+  mapTimeLabel: {
     color: '#7db1ff',
     fontSize: 9,
     fontWeight: 800,
     letterSpacing: '1px',
+    marginBottom: 2,
   },
-  futureTimelineTime: {
+  mapTimeValue: {
     color: '#fff',
     fontSize: 14,
     fontWeight: 700,
     whiteSpace: 'nowrap',
   },
-  futureTimelineReset: {
-    border: 0,
-    borderRadius: 12,
-    padding: '8px 11px',
+  mapTimeChevron: {
+    color: '#fff',
+    fontSize: 18,
+    marginLeft: 12,
+  },
+  mapTimePanel: {
+    position: 'absolute',
+    bottom: 74,
+    left: 16,
+    width: 340,
+    maxWidth: 'calc(100% - 32px)',
     backgroundColor: '#fff',
+    borderRadius: 16,
+    boxShadow: '0 4px 18px rgba(0,0,0,0.2)',
+    overflow: 'hidden',
+    zIndex: 60,
+  },
+  mapTimePanelTitle: {
+    fontSize: 20,
+    fontWeight: 700,
     color: '#1a1a1a',
-    fontSize: 11,
+    padding: '18px 18px 2px',
+  },
+  mapTimePanelSubtitle: {
+    fontSize: 12,
+    color: '#777',
+    padding: '0 18px 8px',
+  },
+  mapTimePanelActions: {
+    display: 'flex',
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    padding: '12px 14px 14px',
+  },
+  mapTimeNowButton: {
+    border: 0,
+    borderRadius: 10,
+    padding: '9px 13px',
+    backgroundColor: '#f0f0f0',
+    color: '#444',
+    fontSize: 12,
     fontWeight: 700,
     cursor: 'pointer',
   },
-  timelinePill: {
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: '10px 16px',
-    gap: 8,
-    cursor: 'pointer',
-    flexShrink: 0,
-  },
-  timelinePillDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#fff',
-  },
-  timelinePillText: {
+  mapTimeDoneButton: {
+    border: 0,
+    borderRadius: 10,
+    padding: '9px 16px',
+    backgroundColor: '#1a1a1a',
     color: '#fff',
-    fontSize: 13,
-    fontWeight: 600,
-    whiteSpace: 'nowrap',
-  },
-  timelineTrack: {
-    position: 'relative',
-    height: 20,
-    flex: 1,
+    fontSize: 12,
+    fontWeight: 700,
     cursor: 'pointer',
-    marginRight: 10,
-    display: 'flex',
-    alignItems: 'center',
-  },
-  trackLine: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 2,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    borderRadius: 1,
-  },
-  dotWrapper: {
-    position: 'absolute',
-    top: '50%',
-    transform: 'translate(-50%, -50%)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  dot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.35)',
-  },
-  dotActive: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#fff',
-    boxShadow: '0 0 8px rgba(255,255,255,0.5)',
   },
   filterContainer: {
     position: 'absolute',

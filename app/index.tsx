@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, GestureResponderEvent, LayoutChangeEvent, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { AppEvent, Report, ReportCategory } from '@/types';
@@ -14,7 +14,6 @@ import { registerForPushNotifications } from '@/services/notifications';
 
 const WELCOME_KEY = 'pulse_welcomed';
 const HOUR_MS = 60 * 60 * 1000;
-const MAIN_TIMELINE_HOURS = 24;
 const UPCOMING_BROWSER_HOURS = 72;
 
 function getDateKey(time: Date): string {
@@ -71,13 +70,9 @@ export default function MapScreen() {
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
   const [showListView, setShowListView] = useState(false);
-  const [timelineIndex, setTimelineIndex] = useState(0);
-  const [timelineVisualIndex, setTimelineVisualIndex] = useState(0);
-  const [mapSelectedTime, setMapSelectedTime] = useState(() => Date.now());
-  const [timelineOpen, setTimelineOpen] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
+  const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
-  const [trackWidth, setTrackWidth] = useState(0);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const filterAnim = useRef(new Animated.Value(0)).current;
   const [activeCategories, setActiveCategories] = useState<Set<EventCategory>>(
@@ -203,33 +198,6 @@ export default function MapScreen() {
     setShowWelcome(false);
   }, []);
 
-  const timelineSnaps = useMemo(() => {
-    const snaps: { label: string; time: Date }[] = [];
-    const now = new Date();
-    const endTime = new Date(now.getTime() + MAIN_TIMELINE_HOURS * HOUR_MS);
-    snaps.push({ label: 'Now', time: now });
-
-    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-
-    // Generate 2-hour snaps for the main screen's next 24 hours
-    const firstSnap = new Date(now);
-    firstSnap.setMinutes(0, 0, 0);
-    firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
-
-    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + 2 * 60 * 60 * 1000)) {
-      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / 86400000);
-      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
-
-      const h = d.getHours();
-      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-      const ampm = h < 12 ? 'AM' : 'PM';
-      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
-    }
-    return snaps;
-  }, []);
-
   const listTimelineSnaps = useMemo(() => {
     const snaps: { label: string; time: Date }[] = [];
     const now = new Date();
@@ -282,61 +250,11 @@ export default function MapScreen() {
     [listTimelineSnaps, selectedListDayKey]
   );
 
+  const mapSelectedTime = listTimelineSnaps[listTimelineIndex].time.getTime();
+
   const applyListTimeIndex = useCallback((index: number) => {
-    const selectedTime = listTimelineSnaps[index].time.getTime();
     setListTimelineIndex(index);
-    setMapSelectedTime(selectedTime);
-    setTimelineOpen(false);
-
-    if (selectedTime <= timelineSnaps[timelineSnaps.length - 1].time.getTime()) {
-      const closestIndex = timelineSnaps.reduce((bestIndex, snap, snapIndex) =>
-        Math.abs(snap.time.getTime() - selectedTime) <
-        Math.abs(timelineSnaps[bestIndex].time.getTime() - selectedTime)
-          ? snapIndex
-          : bestIndex
-      , 0);
-      setTimelineIndex(closestIndex);
-      setTimelineVisualIndex(closestIndex);
-    }
-  }, [listTimelineSnaps, timelineSnaps]);
-
-  const timelineTrackRef = useRef<View>(null);
-  const timelineTrackX = useRef(0);
-
-  const timelineMoveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  const applyMapTimelineIndex = useCallback((index: number) => {
-    setTimelineIndex(index);
-    setMapSelectedTime(timelineSnaps[index].time.getTime());
-  }, [timelineSnaps]);
-
-  const updateTimelineFromTouch = useCallback((pageX: number, immediate = false) => {
-    if (!trackWidth) return;
-    const x = pageX - timelineTrackX.current;
-    const fraction = Math.max(0, Math.min(1, x / trackWidth));
-    const index = Math.round(fraction * (timelineSnaps.length - 1));
-    setTimelineVisualIndex(index);
-    if (immediate) {
-      applyMapTimelineIndex(index);
-    } else {
-      if (timelineMoveTimer.current) clearTimeout(timelineMoveTimer.current);
-      timelineMoveTimer.current = setTimeout(() => applyMapTimelineIndex(index), 100);
-    }
-  }, [applyMapTimelineIndex, trackWidth, timelineSnaps.length]);
-
-  const handleTimelineGrant = useCallback((evt: GestureResponderEvent) => {
-    timelineTrackRef.current?.measureInWindow((x) => {
-      timelineTrackX.current = x;
-      updateTimelineFromTouch(evt.nativeEvent.pageX, true);
-    });
-  }, [updateTimelineFromTouch]);
-
-  const handleTimelineMove = useCallback((evt: GestureResponderEvent) => {
-    updateTimelineFromTouch(evt.nativeEvent.pageX);
-  }, [updateTimelineFromTouch]);
-
-  const handleTrackLayout = useCallback((evt: LayoutChangeEvent) => {
-    setTrackWidth(evt.nativeEvent.layout.width);
+    setSelectedEvent(null);
   }, []);
 
   useEffect(() => {
@@ -475,7 +393,7 @@ export default function MapScreen() {
     }
     setSelectedEvent(null);
     setSelectedReport(null);
-    setTimelineOpen(false);
+    setMapTimePickerOpen(false);
     setFiltersOpen(false);
     setShowListView(false);
   }, [pinDropMode]);
@@ -576,16 +494,9 @@ export default function MapScreen() {
     return `${months[d.getMonth()]} ${d.getDate()}, ${time}`;
   };
 
-  const isFutureTimeline =
-    mapSelectedTime > timelineSnaps[timelineSnaps.length - 1].time.getTime();
-
-  const resetMapTimeline = () => {
-    setTimelineIndex(0);
-    setTimelineVisualIndex(0);
-    setListTimelineIndex(0);
-    setMapSelectedTime(timelineSnaps[0].time.getTime());
-    setTimelineOpen(false);
-    setSelectedEvent(null);
+  const resetMapTime = () => {
+    applyListTimeIndex(0);
+    setMapTimePickerOpen(false);
   };
 
   return (
@@ -801,80 +712,27 @@ export default function MapScreen() {
         </View>
       )}
 
-      {isFutureTimeline ? (
-        <View style={styles.futureTimelineBar}>
-          <View style={styles.futureTimelineInfo}>
-            <Text style={styles.futureTimelineBadge}>FUTURE</Text>
-            <Text style={styles.futureTimelineTime}>{formatTime(mapSelectedTime)}</Text>
-          </View>
-          <TouchableOpacity
-            style={styles.futureTimelineReset}
-            onPress={resetMapTimeline}
-            activeOpacity={0.75}
-          >
-            <Text style={styles.futureTimelineResetText}>Back to now</Text>
-          </TouchableOpacity>
+      <TouchableOpacity
+        style={styles.mapTimeButton}
+        onPress={() => {
+          setShowListView(false);
+          setMapTimePickerOpen(true);
+        }}
+        activeOpacity={0.8}
+      >
+        <View>
+          <Text style={styles.mapTimeLabel}>WHEN</Text>
+          <Text style={styles.mapTimeValue}>
+            {listTimelineIndex === 0 ? 'Now' : formatTime(mapSelectedTime)}
+          </Text>
         </View>
-      ) : (
-        <View style={[styles.timelineBar, !timelineOpen && { right: 'auto' as any }]}>
-          <TouchableOpacity
-            style={styles.timelinePill}
-            onPress={() => setTimelineOpen((v) => !v)}
-            activeOpacity={0.8}
-          >
-            <View style={styles.timelinePillDot} />
-            <Text style={[styles.timelinePillText, timelineOpen && { minWidth: 72 }]}>
-              {timelineVisualIndex === 0 ? 'Now' : timelineSnaps[timelineVisualIndex].label}
-            </Text>
-          </TouchableOpacity>
-          {timelineOpen && (
-            <View
-              ref={timelineTrackRef}
-              style={styles.timelineTrack}
-              onLayout={handleTrackLayout}
-              onStartShouldSetResponder={() => true}
-              onMoveShouldSetResponder={() => true}
-              onResponderGrant={handleTimelineGrant}
-              onResponderMove={handleTimelineMove}
-            >
-              <View style={styles.trackLine} />
-              {timelineSnaps.map((snap, i) => {
-                const isActive = i === timelineVisualIndex;
-                return (
-                  <View
-                    key={i}
-                    style={[
-                      styles.timelineDotWrapper,
-                      { left: `${(i / (timelineSnaps.length - 1)) * 100}%` },
-                    ]}
-                  >
-                    <View
-                      style={[
-                        styles.timelineDot,
-                        isActive && styles.timelineDotActive,
-                      ]}
-                    />
-                  </View>
-                );
-              })}
-            </View>
-          )}
-        </View>
-      )}
+        <Text style={styles.mapTimeChevron}>⌄</Text>
+      </TouchableOpacity>
 
       <TouchableOpacity
         style={styles.listToggleButton}
         onPress={() => {
-          if (!showListView) {
-            const mapTime = mapSelectedTime;
-            const closestIndex = listTimelineSnaps.reduce((bestIndex, snap, index) =>
-              Math.abs(snap.time.getTime() - mapTime) <
-              Math.abs(listTimelineSnaps[bestIndex].time.getTime() - mapTime)
-                ? index
-                : bestIndex
-            , 0);
-            setListTimelineIndex(closestIndex);
-          }
+          setMapTimePickerOpen(false);
           setShowListView((visible) => !visible);
         }}
         activeOpacity={0.8}
@@ -976,6 +834,65 @@ export default function MapScreen() {
           </TouchableOpacity>
         </View>
       )}
+
+      <Modal
+        visible={mapTimePickerOpen}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setMapTimePickerOpen(false)}
+      >
+        <TouchableOpacity
+          style={styles.listPickerBackdrop}
+          activeOpacity={1}
+          onPress={() => setMapTimePickerOpen(false)}
+        >
+          <View style={styles.mapPickerCard} onStartShouldSetResponder={() => true}>
+            <Text style={styles.listPickerTitle}>Choose date and time</Text>
+            <Text style={styles.mapPickerSubtitle}>Show events happening at a specific time.</Text>
+            <View style={styles.listTimeControls}>
+              <TouchableOpacity
+                style={styles.listSelect}
+                onPress={() => setListPickerOpen('day')}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.listSelectLabel}>Day</Text>
+                <View style={styles.listSelectValueRow}>
+                  <Text style={styles.listSelectValue}>
+                    {listDayOptions.find((option) => option.key === selectedListDayKey)?.label}
+                  </Text>
+                  <Text style={styles.listSelectChevron}>⌄</Text>
+                </View>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.listSelect}
+                onPress={() => setListPickerOpen('time')}
+                activeOpacity={0.75}
+              >
+                <Text style={styles.listSelectLabel}>Time</Text>
+                <View style={styles.listSelectValueRow}>
+                  <Text style={styles.listSelectValue}>
+                    {formatBrowseTime(listTimelineSnaps[listTimelineIndex].time, listTimelineIndex === 0)}
+                  </Text>
+                  <Text style={styles.listSelectChevron}>⌄</Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+            <View style={styles.mapPickerActions}>
+              {listTimelineIndex !== 0 && (
+                <TouchableOpacity style={styles.mapPickerNowButton} onPress={resetMapTime}>
+                  <Text style={styles.mapPickerNowText}>Back to now</Text>
+                </TouchableOpacity>
+              )}
+              <TouchableOpacity
+                style={styles.mapPickerDoneButton}
+                onPress={() => setMapTimePickerOpen(false)}
+              >
+                <Text style={styles.mapPickerDoneText}>Done</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
       <Modal
         visible={listPickerOpen !== null}
@@ -1538,114 +1455,41 @@ const styles = StyleSheet.create({
   floatingVoteCountActive: {
     color: '#fff',
   },
-  timelineBar: {
+  mapTimeButton: {
     position: 'absolute',
     bottom: 100,
     left: 16,
-    right: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 22,
-    paddingRight: 6,
-  },
-  futureTimelineBar: {
-    position: 'absolute',
-    bottom: 100,
-    left: 16,
-    right: 16,
+    minWidth: 150,
     minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    backgroundColor: 'rgba(30, 30, 30, 0.92)',
+    backgroundColor: 'rgba(30, 30, 30, 0.9)',
     borderRadius: 16,
     paddingVertical: 8,
-    paddingLeft: 12,
-    paddingRight: 8,
+    paddingHorizontal: 13,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 5,
+    elevation: 5,
   },
-  futureTimelineInfo: {
-    flex: 1,
-    marginRight: 8,
-  },
-  futureTimelineBadge: {
+  mapTimeLabel: {
     color: '#7db1ff',
     fontSize: 9,
     fontWeight: '800',
     letterSpacing: 1,
     marginBottom: 2,
   },
-  futureTimelineTime: {
+  mapTimeValue: {
     color: '#fff',
     fontSize: 14,
     fontWeight: '700',
   },
-  futureTimelineReset: {
-    backgroundColor: '#fff',
-    borderRadius: 12,
-    paddingVertical: 8,
-    paddingHorizontal: 11,
-  },
-  futureTimelineResetText: {
-    color: '#1a1a1a',
-    fontSize: 11,
-    fontWeight: '700',
-  },
-  timelinePill: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    gap: 8,
-  },
-  timelinePillDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#fff',
-  },
-  timelinePillText: {
+  mapTimeChevron: {
     color: '#fff',
-    fontSize: 13,
-    fontWeight: '600',
-  },
-  timelineTrack: {
-    flex: 1,
-    height: 20,
-    marginRight: 10,
-    justifyContent: 'center',
-  },
-  trackLine: {
-    position: 'absolute',
-    left: 0,
-    right: 0,
-    height: 2,
-    backgroundColor: 'rgba(255, 255, 255, 0.15)',
-    borderRadius: 1,
-  },
-  timelineDotWrapper: {
-    position: 'absolute',
-    top: '50%',
-    alignItems: 'center',
-    justifyContent: 'center',
-    transform: [{ translateX: -3 }, { translateY: -3 }],
-  },
-  timelineDot: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: 'rgba(255, 255, 255, 0.35)',
-  },
-  timelineDotActive: {
-    backgroundColor: '#fff',
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    shadowColor: '#fff',
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.5,
-    shadowRadius: 4,
-    transform: [{ translateX: -7 }, { translateY: -7 }],
+    fontSize: 18,
+    marginLeft: 12,
   },
   listToggleButton: {
     position: 'absolute',
@@ -1738,6 +1582,49 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     padding: 24,
+  },
+  mapPickerCard: {
+    width: '100%',
+    maxWidth: 360,
+    backgroundColor: '#fff',
+    borderRadius: 18,
+    paddingTop: 20,
+    overflow: 'hidden',
+  },
+  mapPickerSubtitle: {
+    fontSize: 13,
+    color: '#777',
+    paddingHorizontal: 20,
+    paddingBottom: 12,
+  },
+  mapPickerActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+  },
+  mapPickerNowButton: {
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 14,
+    backgroundColor: '#f0f0f0',
+  },
+  mapPickerNowText: {
+    color: '#444',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  mapPickerDoneButton: {
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    backgroundColor: '#1a1a1a',
+  },
+  mapPickerDoneText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '700',
   },
   listPickerCard: {
     width: '100%',
