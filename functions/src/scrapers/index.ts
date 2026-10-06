@@ -5,6 +5,7 @@ import { createOhMyRocknessScraper } from "./sites/ohmyrockness.js";
 import { createNYEventRadarScraper } from "./sites/nyeventradar.js";
 import { createTheSkintScraper } from "./sites/theskint.js";
 import { createFieldnotesScraper } from "./sites/fieldnotes.js";
+import { createUpstairsNycScraper } from "./sites/upstairsnyc.js";
 
 // Register all event sources here.
 // To add a new source:
@@ -18,5 +19,6 @@ export function getAllSources(apiKey: string): EventSource[] {
     createNYEventRadarScraper(apiKey),
     createTheSkintScraper(apiKey),
     createFieldnotesScraper(apiKey),
+    createUpstairsNycScraper(apiKey),
   ];
 }
