@@ -19,7 +19,7 @@
     "@sparticuz/chromium": "^141.0.0",
     "expo-server-sdk": "^6.1.0",
     "firebase-admin": "^13.0.0",
-    "firebase-functions": "^6.3.0",
+    "firebase-functions": "^7.4.0",
     "node-fetch": "^3.3.2",
     "puppeteer-core": "^24.26.1"
   },
