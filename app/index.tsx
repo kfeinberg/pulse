@@ -73,6 +73,7 @@ export default function MapScreen() {
   const [showListView, setShowListView] = useState(false);
   const [timelineIndex, setTimelineIndex] = useState(0);
   const [timelineVisualIndex, setTimelineVisualIndex] = useState(0);
+  const [mapSelectedTime, setMapSelectedTime] = useState(() => Date.now());
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
@@ -281,10 +282,33 @@ export default function MapScreen() {
     [listTimelineSnaps, selectedListDayKey]
   );
 
+  const applyListTimeIndex = useCallback((index: number) => {
+    const selectedTime = listTimelineSnaps[index].time.getTime();
+    setListTimelineIndex(index);
+    setMapSelectedTime(selectedTime);
+    setTimelineOpen(false);
+
+    if (selectedTime <= timelineSnaps[timelineSnaps.length - 1].time.getTime()) {
+      const closestIndex = timelineSnaps.reduce((bestIndex, snap, snapIndex) =>
+        Math.abs(snap.time.getTime() - selectedTime) <
+        Math.abs(timelineSnaps[bestIndex].time.getTime() - selectedTime)
+          ? snapIndex
+          : bestIndex
+      , 0);
+      setTimelineIndex(closestIndex);
+      setTimelineVisualIndex(closestIndex);
+    }
+  }, [listTimelineSnaps, timelineSnaps]);
+
   const timelineTrackRef = useRef<View>(null);
   const timelineTrackX = useRef(0);
 
   const timelineMoveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const applyMapTimelineIndex = useCallback((index: number) => {
+    setTimelineIndex(index);
+    setMapSelectedTime(timelineSnaps[index].time.getTime());
+  }, [timelineSnaps]);
 
   const updateTimelineFromTouch = useCallback((pageX: number, immediate = false) => {
     if (!trackWidth) return;
@@ -293,12 +317,12 @@ export default function MapScreen() {
     const index = Math.round(fraction * (timelineSnaps.length - 1));
     setTimelineVisualIndex(index);
     if (immediate) {
-      setTimelineIndex(index);
+      applyMapTimelineIndex(index);
     } else {
       if (timelineMoveTimer.current) clearTimeout(timelineMoveTimer.current);
-      timelineMoveTimer.current = setTimeout(() => setTimelineIndex(index), 100);
+      timelineMoveTimer.current = setTimeout(() => applyMapTimelineIndex(index), 100);
     }
-  }, [trackWidth, timelineSnaps.length]);
+  }, [applyMapTimelineIndex, trackWidth, timelineSnaps.length]);
 
   const handleTimelineGrant = useCallback((evt: GestureResponderEvent) => {
     timelineTrackRef.current?.measureInWindow((x) => {
@@ -428,7 +452,7 @@ export default function MapScreen() {
 
   // Filter events based on selected timeline time and category
   useEffect(() => {
-    const selectedTime = timelineSnaps[timelineIndex].time.getTime();
+    const selectedTime = mapSelectedTime;
     const filtered = allEvents.filter((event: any) => {
       const started = event.startTime.toMillis() <= selectedTime;
       const notEnded = event.endTime.toMillis() > selectedTime;
@@ -440,7 +464,7 @@ export default function MapScreen() {
       if (!prev) return null;
       return filtered.find((e) => e.id === prev.id) ? prev : null;
     });
-  }, [allEvents, timelineIndex, timelineSnaps, activeCategories]);
+  }, [allEvents, mapSelectedTime, activeCategories]);
 
   const handleMapPress = useCallback((e: MapPressEvent) => {
     if (e.nativeEvent.action === 'marker-press') return;
@@ -550,6 +574,18 @@ export default function MapScreen() {
 
     const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
     return `${months[d.getMonth()]} ${d.getDate()}, ${time}`;
+  };
+
+  const isFutureTimeline =
+    mapSelectedTime > timelineSnaps[timelineSnaps.length - 1].time.getTime();
+
+  const resetMapTimeline = () => {
+    setTimelineIndex(0);
+    setTimelineVisualIndex(0);
+    setListTimelineIndex(0);
+    setMapSelectedTime(timelineSnaps[0].time.getTime());
+    setTimelineOpen(false);
+    setSelectedEvent(null);
   };
 
   return (
@@ -765,56 +801,72 @@ export default function MapScreen() {
         </View>
       )}
 
-      <View style={[styles.timelineBar, !timelineOpen && { right: 'auto' as any }]}>
-        <TouchableOpacity
-          style={styles.timelinePill}
-          onPress={() => setTimelineOpen((v) => !v)}
-          activeOpacity={0.8}
-        >
-          <View style={styles.timelinePillDot} />
-          <Text style={[styles.timelinePillText, timelineOpen && { minWidth: 72 }]}>
-            {timelineVisualIndex === 0 ? 'Now' : timelineSnaps[timelineVisualIndex].label}
-          </Text>
-        </TouchableOpacity>
-        {timelineOpen && (
-          <View
-            ref={timelineTrackRef}
-            style={styles.timelineTrack}
-            onLayout={handleTrackLayout}
-            onStartShouldSetResponder={() => true}
-            onMoveShouldSetResponder={() => true}
-            onResponderGrant={handleTimelineGrant}
-            onResponderMove={handleTimelineMove}
-          >
-            <View style={styles.trackLine} />
-            {timelineSnaps.map((snap, i) => {
-              const isActive = i === timelineVisualIndex;
-              return (
-                <View
-                  key={i}
-                  style={[
-                    styles.timelineDotWrapper,
-                    { left: `${(i / (timelineSnaps.length - 1)) * 100}%` },
-                  ]}
-                >
-                  <View
-                    style={[
-                      styles.timelineDot,
-                      isActive && styles.timelineDotActive,
-                    ]}
-                  />
-                </View>
-              );
-            })}
+      {isFutureTimeline ? (
+        <View style={styles.futureTimelineBar}>
+          <View style={styles.futureTimelineInfo}>
+            <Text style={styles.futureTimelineBadge}>FUTURE</Text>
+            <Text style={styles.futureTimelineTime}>{formatTime(mapSelectedTime)}</Text>
           </View>
-        )}
-      </View>
+          <TouchableOpacity
+            style={styles.futureTimelineReset}
+            onPress={resetMapTimeline}
+            activeOpacity={0.75}
+          >
+            <Text style={styles.futureTimelineResetText}>Back to now</Text>
+          </TouchableOpacity>
+        </View>
+      ) : (
+        <View style={[styles.timelineBar, !timelineOpen && { right: 'auto' as any }]}>
+          <TouchableOpacity
+            style={styles.timelinePill}
+            onPress={() => setTimelineOpen((v) => !v)}
+            activeOpacity={0.8}
+          >
+            <View style={styles.timelinePillDot} />
+            <Text style={[styles.timelinePillText, timelineOpen && { minWidth: 72 }]}>
+              {timelineVisualIndex === 0 ? 'Now' : timelineSnaps[timelineVisualIndex].label}
+            </Text>
+          </TouchableOpacity>
+          {timelineOpen && (
+            <View
+              ref={timelineTrackRef}
+              style={styles.timelineTrack}
+              onLayout={handleTrackLayout}
+              onStartShouldSetResponder={() => true}
+              onMoveShouldSetResponder={() => true}
+              onResponderGrant={handleTimelineGrant}
+              onResponderMove={handleTimelineMove}
+            >
+              <View style={styles.trackLine} />
+              {timelineSnaps.map((snap, i) => {
+                const isActive = i === timelineVisualIndex;
+                return (
+                  <View
+                    key={i}
+                    style={[
+                      styles.timelineDotWrapper,
+                      { left: `${(i / (timelineSnaps.length - 1)) * 100}%` },
+                    ]}
+                  >
+                    <View
+                      style={[
+                        styles.timelineDot,
+                        isActive && styles.timelineDotActive,
+                      ]}
+                    />
+                  </View>
+                );
+              })}
+            </View>
+          )}
+        </View>
+      )}
 
       <TouchableOpacity
         style={styles.listToggleButton}
         onPress={() => {
           if (!showListView) {
-            const mapTime = timelineSnaps[timelineIndex]?.time.getTime() ?? Date.now();
+            const mapTime = mapSelectedTime;
             const closestIndex = listTimelineSnaps.reduce((bestIndex, snap, index) =>
               Math.abs(snap.time.getTime() - mapTime) <
               Math.abs(listTimelineSnaps[bestIndex].time.getTime() - mapTime)
@@ -960,7 +1012,7 @@ export default function MapScreen() {
                     option.selected && styles.listPickerOptionSelected,
                   ]}
                   onPress={() => {
-                    setListTimelineIndex(option.index);
+                    applyListTimeIndex(option.index);
                     setListPickerOpen(null);
                   }}
                   activeOpacity={0.7}
@@ -1496,6 +1548,48 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 30, 0.85)',
     borderRadius: 22,
     paddingRight: 6,
+  },
+  futureTimelineBar: {
+    position: 'absolute',
+    bottom: 100,
+    left: 16,
+    right: 16,
+    minHeight: 48,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: 'rgba(30, 30, 30, 0.92)',
+    borderRadius: 16,
+    paddingVertical: 8,
+    paddingLeft: 12,
+    paddingRight: 8,
+  },
+  futureTimelineInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  futureTimelineBadge: {
+    color: '#7db1ff',
+    fontSize: 9,
+    fontWeight: '800',
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  futureTimelineTime: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  futureTimelineReset: {
+    backgroundColor: '#fff',
+    borderRadius: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 11,
+  },
+  futureTimelineResetText: {
+    color: '#1a1a1a',
+    fontSize: 11,
+    fontWeight: '700',
   },
   timelinePill: {
     flexDirection: 'row',

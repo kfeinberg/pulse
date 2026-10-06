@@ -172,6 +172,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const [events, setEvents] = useState<AppEvent[]>([]);
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [timelineIndex, setTimelineIndex] = useState(0);
+  const [mapSelectedTime, setMapSelectedTime] = useState(() => Date.now());
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [listTimelineIndex, setListTimelineIndex] = useState(0);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
@@ -398,6 +399,23 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     [listTimelineSnaps, selectedListDayKey]
   );
 
+  const applyListTimeIndex = useCallback((index: number) => {
+    const selectedTime = listTimelineSnaps[index].time.getTime();
+    setListTimelineIndex(index);
+    setMapSelectedTime(selectedTime);
+    setTimelineOpen(false);
+
+    if (selectedTime <= timelineSnaps[timelineSnaps.length - 1].time.getTime()) {
+      const closestIndex = timelineSnaps.reduce((bestIndex, snap, snapIndex) =>
+        Math.abs(snap.time.getTime() - selectedTime) <
+        Math.abs(timelineSnaps[bestIndex].time.getTime() - selectedTime)
+          ? snapIndex
+          : bestIndex
+      , 0);
+      setTimelineIndex(closestIndex);
+    }
+  }, [listTimelineSnaps, timelineSnaps]);
+
   const listEvents = useMemo(() => {
     const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
     const filtered = allEvents.filter((event) =>
@@ -436,7 +454,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
 
   // Filter by timeline and category
   useEffect(() => {
-    const selectedTime = timelineSnaps[timelineIndex].time.getTime();
+    const selectedTime = mapSelectedTime;
     const filtered = allEvents.filter((event: any) => {
       const started = event.startTime.toMillis() <= selectedTime;
       const notEnded = event.endTime.toMillis() > selectedTime;
@@ -447,7 +465,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       if (!prev) return null;
       return filtered.find((e) => e.id === prev.id) ? prev : null;
     });
-  }, [allEvents, timelineIndex, timelineSnaps, activeCategories]);
+  }, [allEvents, mapSelectedTime, activeCategories]);
 
   const handleTimelineDrag = useCallback((e: React.MouseEvent | React.TouchEvent) => {
     if (!trackRef.current) return;
@@ -458,7 +476,8 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     // Snap to "Now" (index 0) more easily to prevent flickering
     const index = rawIndex < 0.8 ? 0 : Math.round(rawIndex);
     setTimelineIndex(index);
-  }, [timelineSnaps.length]);
+    setMapSelectedTime(timelineSnaps[index].time.getTime());
+  }, [timelineSnaps]);
 
   const handleTrackMouseDown = useCallback((e: React.MouseEvent) => {
     handleTimelineDrag(e);
@@ -474,6 +493,17 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
   const handleTrackTouchStart = useCallback((e: React.TouchEvent) => {
     handleTimelineDrag(e);
   }, [handleTimelineDrag]);
+
+  const isFutureTimeline =
+    mapSelectedTime > timelineSnaps[timelineSnaps.length - 1].time.getTime();
+
+  const resetMapTimeline = () => {
+    setTimelineIndex(0);
+    setListTimelineIndex(0);
+    setMapSelectedTime(timelineSnaps[0].time.getTime());
+    setTimelineOpen(false);
+    setSelectedEvent(null);
+  };
 
   if (!isLoaded) {
     return <div style={styles.loading}>Loading map...</div>;
@@ -896,52 +926,64 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       )}
 
       {/* Timeline bar */}
-      <div style={{
-        ...styles.timelineBar,
-        ...(timelineOpen ? {} : { right: 'auto' }),
-      }}>
-        <div
-          style={styles.timelinePill}
-          onClick={() => setTimelineOpen((v) => !v)}
-        >
-          <div style={styles.timelinePillDot} />
-          <span style={{ ...styles.timelinePillText, ...(timelineOpen ? { minWidth: 72 } : {}) }}>
-            {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
-          </span>
-        </div>
-        {timelineOpen && (
-          <div
-            ref={trackRef}
-            style={styles.timelineTrack}
-            onMouseDown={handleTrackMouseDown}
-            onTouchStart={handleTrackTouchStart}
-            onTouchMove={handleTimelineDrag}
-          >
-            <div style={styles.trackLine} />
-            {timelineSnaps.map((snap, i) => {
-              const isActive = i === timelineIndex;
-              const pct = (i / (timelineSnaps.length - 1)) * 100;
-              return (
-                <div key={i} style={{ ...styles.dotWrapper, left: `${pct}%` }}>
-                  <div
-                    style={{
-                      ...styles.dot,
-                      ...(isActive ? styles.dotActive : {}),
-                    }}
-                  />
-                </div>
-              );
-            })}
+      {isFutureTimeline ? (
+        <div style={styles.futureTimelineBar}>
+          <div style={styles.futureTimelineInfo}>
+            <span style={styles.futureTimelineBadge}>FUTURE</span>
+            <span style={styles.futureTimelineTime}>{formatTime(mapSelectedTime)}</span>
           </div>
-        )}
-      </div>
+          <button style={styles.futureTimelineReset} onClick={resetMapTimeline}>
+            Back to now
+          </button>
+        </div>
+      ) : (
+        <div style={{
+          ...styles.timelineBar,
+          ...(timelineOpen ? {} : { right: 'auto' }),
+        }}>
+          <div
+            style={styles.timelinePill}
+            onClick={() => setTimelineOpen((v) => !v)}
+          >
+            <div style={styles.timelinePillDot} />
+            <span style={{ ...styles.timelinePillText, ...(timelineOpen ? { minWidth: 72 } : {}) }}>
+              {timelineIndex === 0 ? 'Now' : timelineSnaps[timelineIndex].label}
+            </span>
+          </div>
+          {timelineOpen && (
+            <div
+              ref={trackRef}
+              style={styles.timelineTrack}
+              onMouseDown={handleTrackMouseDown}
+              onTouchStart={handleTrackTouchStart}
+              onTouchMove={handleTimelineDrag}
+            >
+              <div style={styles.trackLine} />
+              {timelineSnaps.map((snap, i) => {
+                const isActive = i === timelineIndex;
+                const pct = (i / (timelineSnaps.length - 1)) * 100;
+                return (
+                  <div key={i} style={{ ...styles.dotWrapper, left: `${pct}%` }}>
+                    <div
+                      style={{
+                        ...styles.dot,
+                        ...(isActive ? styles.dotActive : {}),
+                      }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
 
       {/* List toggle button */}
       <div
         style={styles.listToggleButton}
         onClick={() => {
           if (!showListView) {
-            const mapTime = timelineSnaps[timelineIndex]?.time.getTime() ?? Date.now();
+            const mapTime = mapSelectedTime;
             const closestIndex = listTimelineSnaps.reduce((bestIndex, snap, index) =>
               Math.abs(snap.time.getTime() - mapTime) <
               Math.abs(listTimelineSnaps[bestIndex].time.getTime() - mapTime)
@@ -1131,7 +1173,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                 value={selectedListDayKey}
                 onChange={(event) => {
                   const option = listDayOptions.find((day) => day.key === event.target.value);
-                  if (option) setListTimelineIndex(option.firstIndex);
+                  if (option) applyListTimeIndex(option.firstIndex);
                 }}
               >
                 {listDayOptions.map((option) => (
@@ -1145,7 +1187,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                 aria-label="Choose time"
                 style={styles.listSelect}
                 value={listTimelineIndex}
-                onChange={(event) => setListTimelineIndex(Number(event.target.value))}
+                onChange={(event) => applyListTimeIndex(Number(event.target.value))}
               >
                 {listTimeOptions.map((option) => (
                   <option key={option.index} value={option.index}>{option.label}</option>
@@ -1545,6 +1587,47 @@ const styles: Record<string, React.CSSProperties> = {
     padding: '0 6px 0 0',
     gap: 0,
     userSelect: 'none',
+  },
+  futureTimelineBar: {
+    position: 'absolute',
+    bottom: 16,
+    left: 16,
+    display: 'flex',
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 18,
+    minHeight: 48,
+    backgroundColor: 'rgba(30, 30, 30, 0.92)',
+    borderRadius: 16,
+    padding: '8px 8px 8px 12px',
+    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
+  },
+  futureTimelineInfo: {
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 2,
+  },
+  futureTimelineBadge: {
+    color: '#7db1ff',
+    fontSize: 9,
+    fontWeight: 800,
+    letterSpacing: '1px',
+  },
+  futureTimelineTime: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: 700,
+    whiteSpace: 'nowrap',
+  },
+  futureTimelineReset: {
+    border: 0,
+    borderRadius: 12,
+    padding: '8px 11px',
+    backgroundColor: '#fff',
+    color: '#1a1a1a',
+    fontSize: 11,
+    fontWeight: 700,
+    cursor: 'pointer',
   },
   timelinePill: {
     display: 'flex',
