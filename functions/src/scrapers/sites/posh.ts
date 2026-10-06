@@ -1,117 +1,141 @@
-import { EventSource, ScrapedEvent } from "../base.js";
+import { ScrapedEvent } from "../base.js";
 import { parseEventsFromText } from "../../services/parser.js";
 
-const EXPLORE_URL = "https://posh.vip/explore";
+export const POSH_EXPLORE_URL =
+  "https://posh.vip/explore?location=new_york_city";
 
-async function fetchRenderedHtml(
-  url: string,
-  scrapingBeeKey: string
-): Promise<string> {
-  const params = new URLSearchParams({
-    api_key: scrapingBeeKey,
-    url,
-    render_js: "true",
-    wait: "5000",
-    premium_proxy: "true",
-    stealth_proxy: "true",
-    block_ads: "true",
-    js_scenario: JSON.stringify({
-      instructions: [
-        { wait: 5000 },
-        { scroll_y: 2000 },
-        { wait: 3000 },
-        { scroll_y: 4000 },
-        { wait: 3000 },
-        { scroll_y: 6000 },
-        { wait: 3000 },
-        { scroll_y: 8000 },
-        { wait: 3000 },
-      ],
-    }),
-  });
+export interface PoshIngestEvent {
+  id: string;
+  title: string;
+  url: string;
+  startDate: string;
+  endDate: string;
+  timezone?: string;
+  venueName?: string;
+  venueAddress?: string;
+  shortDescription?: string;
+  minTicketPrice?: number;
+  groupName?: string;
+  lineup?: Array<{ name?: string }>;
+}
 
-  const response = await fetch(
-    `https://app.scrapingbee.com/api/v1?${params.toString()}`
+const NON_NYC_LOCATION = /\b(?:NJ|New Jersey|Passaic|Paterson|Jersey City|Hoboken)\b/i;
+
+function isString(value: unknown): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function isValidEvent(value: unknown): value is PoshIngestEvent {
+  if (!value || typeof value !== "object") return false;
+  const event = value as Record<string, unknown>;
+  return (
+    isString(event.id) &&
+    isString(event.title) &&
+    isString(event.url) &&
+    isString(event.startDate) &&
+    isString(event.endDate) &&
+    Number.isFinite(Date.parse(event.startDate)) &&
+    Number.isFinite(Date.parse(event.endDate))
   );
+}
 
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(
-      `ScrapingBee failed (${response.status}): ${body.slice(0, 200)}`
-    );
+function eventLocation(event: PoshIngestEvent): string {
+  return [event.venueName, event.venueAddress]
+    .filter(isString)
+    .filter((value, index, values) => values.indexOf(value) === index)
+    .join(", ");
+}
+
+export function validatePoshPayload(payload: unknown): PoshIngestEvent[] {
+  if (!Array.isArray(payload)) {
+    throw new Error("Posh payload must be an array");
+  }
+  if (payload.length > 50) {
+    throw new Error("Posh payload exceeds the 50-event limit");
   }
 
-  return response.text();
+  const now = Date.now();
+  return payload
+    .filter(isValidEvent)
+    .filter((event) => Date.parse(event.endDate) > now)
+    .filter((event) => {
+      const address = event.venueAddress?.trim() ?? "";
+      if (!address) {
+        console.warn(`Skipping Posh event without a detail-page address: "${event.title}"`);
+        return false;
+      }
+      if (!/\b\d{1,6}[a-z]?\b/i.test(address)) {
+        console.warn(`Skipping Posh event without a street address: "${event.title}" at ${address}`);
+        return false;
+      }
+      if (NON_NYC_LOCATION.test(address)) {
+        console.log(`Skipping non-NYC Posh event: "${event.title}" at ${address}`);
+        return false;
+      }
+      return true;
+    });
 }
 
-// Lightweight text extraction that preserves rendered content
-function extractText(html: string): string {
-  let cleaned = html;
+export async function parsePoshPayload(
+  payload: unknown,
+  apiKey: string
+): Promise<ScrapedEvent[]> {
+  const events = validatePoshPayload(payload);
+  if (events.length === 0) return [];
 
-  // Remove script tags and contents
-  cleaned = cleaned.replace(/<script[^>]*>[\s\S]*?<\/script>/gi, " ");
-  // Remove style tags and contents
-  cleaned = cleaned.replace(/<style[^>]*>[\s\S]*?<\/style>/gi, " ");
-  // Remove SVG blocks
-  cleaned = cleaned.replace(/<svg[\s\S]*?<\/svg>/gi, " ");
-  // Remove HTML comments
-  cleaned = cleaned.replace(/<!--[\s\S]*?-->/g, " ");
-  // Preserve links: convert <a href="url">text</a> to text (url)
-  cleaned = cleaned.replace(
-    /<a\s[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
-    (_, href, text) => `${text.replace(/<[^>]+>/g, "")} (${href})`
+  const eventTexts = events.map((event) => {
+    const lineup = (event.lineup ?? [])
+      .map((performer) => performer.name)
+      .filter(isString)
+      .join(", ");
+    const eventUrl = `https://posh.vip/e/${event.url}`;
+
+    return (
+      `Event: ${event.title}\n` +
+      `Description: ${event.shortDescription || ""}\n` +
+      `Organizer: ${event.groupName || "N/A"}\n` +
+      `Lineup: ${lineup || "N/A"}\n` +
+      `Minimum ticket price: ${event.minTicketPrice ?? "unknown"}\n` +
+      `Start (UTC): ${event.startDate}\n` +
+      `End (UTC): ${event.endDate}\n` +
+      `Timezone: ${event.timezone || "America/New_York"}\n` +
+      `Location: ${eventLocation(event)}\n` +
+      `URL: ${eventUrl}`
+    );
+  });
+
+  const fullText = eventTexts.join("\n\n---\n\n");
+  console.log(`Sending ${events.length} Posh NYC events to Claude (${fullText.length} chars)`);
+  const parsedEvents = await parseEventsFromText(
+    fullText,
+    "posh",
+    POSH_EXPLORE_URL,
+    apiKey
   );
-  // Remove all remaining tags but keep text
-  cleaned = cleaned.replace(/<[^>]+>/g, " ");
-  // Decode entities
-  cleaned = cleaned
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&nbsp;/g, " ");
-  // Collapse whitespace
-  cleaned = cleaned.replace(/\s+/g, " ").trim();
 
-  return cleaned;
-}
-
-export function createPoshScraper(
-  apiKey: string,
-  scrapingBeeKey: string
-): EventSource {
-  return {
-    name: "posh",
-    async scrape(): Promise<ScrapedEvent[]> {
-      console.log(`Fetching Posh explore page via ScrapingBee: ${EXPLORE_URL}`);
-
-      const html = await fetchRenderedHtml(EXPLORE_URL, scrapingBeeKey);
-      console.log(`Posh rendered HTML: ${html.length} chars`);
-
-      if (html.length < 1000) {
-        console.error(`Posh HTML too short, likely failed: ${html.slice(0, 500)}`);
-        return [];
-      }
-
-      const text = extractText(html);
-      console.log(`Posh extracted text: ${text.length} chars`);
-      console.log(`Text preview: ${text.slice(0, 500)}`);
-
-      if (text.length < 100) {
-        console.error("Posh text extraction produced too little content");
-        return [];
-      }
-
-      const events = await parseEventsFromText(
-        text,
-        "posh",
-        EXPLORE_URL,
-        apiKey
+  const matchedEvents: ScrapedEvent[] = [];
+  for (const parsed of parsedEvents) {
+    const normalizedTitle = parsed.title.toLowerCase();
+    const match = events.find((event) => {
+      const sourceTitle = event.title.toLowerCase();
+      return (
+        normalizedTitle.includes(sourceTitle.slice(0, 20)) ||
+        sourceTitle.includes(normalizedTitle.slice(0, 20))
       );
-      console.log(`Claude extracted ${events.length} events from Posh`);
+    });
+    if (!match) {
+      console.warn(`Discarding unmatched Posh extraction: "${parsed.title}"`);
+      continue;
+    }
 
-      return events;
-    },
-  };
+    parsed.startTimestamp = Date.parse(match.startDate);
+    parsed.endTimestamp = Date.parse(match.endDate);
+    parsed.location = eventLocation(match);
+    parsed.sourceUrl = `https://posh.vip/e/${match.url}`;
+    parsed.sourceName = "posh";
+    matchedEvents.push(parsed);
+  }
+
+  console.log(`Posh: Claude extracted ${matchedEvents.length} validated NYC events`);
+  return matchedEvents;
 }

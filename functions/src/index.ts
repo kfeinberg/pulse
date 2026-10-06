@@ -5,12 +5,26 @@ import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onRequest, onCall, HttpsError } from "firebase-functions/v2/https";
 import { defineSecret } from "firebase-functions/params";
 import { getAllSources } from "./scrapers/index.js";
+import { parsePoshPayload } from "./scrapers/sites/posh.js";
 import { writeScrapedEvents } from "./services/firestore.js";
+import { timingSafeEqual } from "node:crypto";
 import { Expo, ExpoPushMessage } from "expo-server-sdk";
 
 initializeApp();
 
 const anthropicApiKey = defineSecret("ANTHROPIC_API_KEY");
+const poshIngestToken = defineSecret("POSH_INGEST_TOKEN");
+
+function hasValidPoshToken(provided: string | undefined): boolean {
+  if (!provided) return false;
+  const expected = poshIngestToken.value();
+  const providedBuffer = Buffer.from(provided);
+  const expectedBuffer = Buffer.from(expected);
+  return (
+    providedBuffer.length === expectedBuffer.length &&
+    timingSafeEqual(providedBuffer, expectedBuffer)
+  );
+}
 
 async function runScraper(apiKey: string): Promise<string[]> {
   const sources = getAllSources(apiKey);
@@ -74,6 +88,56 @@ export const scrapeNow = onRequest(
     }
 
     res.json(debug);
+  }
+);
+
+// Posh blocks datacenter egress at Cloudflare. A small fetch relay on the
+// owner's Mac sends the public Explore payload here; Firebase still validates,
+// parses, geocodes, deduplicates, and stores every event.
+export const ingestPoshEvents = onRequest(
+  {
+    secrets: [anthropicApiKey, poshIngestToken],
+    timeoutSeconds: 1800,
+    memory: "2GiB",
+  },
+  async (req, res) => {
+    if (req.method !== "POST" || !hasValidPoshToken(req.header("x-posh-ingest-token"))) {
+      res.status(403).json({ error: "Forbidden" });
+      return;
+    }
+
+    const auditRef = getFirestore().collection("_scraperAudits").doc("posh");
+    const startedAt = Date.now();
+    try {
+      const events = await parsePoshPayload(req.body?.events, anthropicApiKey.value());
+      const added = await writeScrapedEvents(events, anthropicApiKey.value());
+      const result = {
+        source: "posh",
+        status: events.length > 0 ? "ok" : "empty",
+        count: events.length,
+        added,
+        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        samples: events.slice(0, 5).map((event) => ({
+          title: event.title,
+          location: event.location,
+          sourceUrl: event.sourceUrl,
+        })),
+        completedAt: Timestamp.now(),
+      };
+      await auditRef.set(result);
+      res.json(result);
+    } catch (error) {
+      const result = {
+        source: "posh",
+        status: "error",
+        error: String(error),
+        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+        completedAt: Timestamp.now(),
+      };
+      await auditRef.set(result);
+      console.error("Posh ingestion failed:", error);
+      res.status(500).json(result);
+    }
   }
 );
 
