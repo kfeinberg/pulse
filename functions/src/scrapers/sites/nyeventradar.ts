@@ -30,10 +30,7 @@ function getDateString(daysFromNow: number): string {
   return d.toISOString().split("T")[0];
 }
 
-export function createNYEventRadarScraper(
-  apiKey: string,
-  _scrapingBeeKey?: string
-): EventSource {
+export function createNYEventRadarScraper(apiKey: string): EventSource {
   return {
     name: "nyeventradar",
     async scrape(): Promise<ScrapedEvent[]> {

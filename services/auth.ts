@@ -13,6 +13,8 @@ import * as Crypto from 'expo-crypto';
 
 let GoogleSignin: any = null;
 try {
+  // Google Sign-In is a custom native module and is unavailable in Expo Go.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
   GoogleSignin = require('@react-native-google-signin/google-signin').GoogleSignin;
   GoogleSignin.configure({
     webClientId: process.env.EXPO_PUBLIC_GOOGLE_WEB_CLIENT_ID,

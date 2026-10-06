@@ -27,13 +27,13 @@ export default function AdminScreen() {
     latitude: number;
     longitude: number;
   } | null>(null);
-  const [startTime, setStartTime] = useState(new Date());
+  const [startTime, setStartTime] = useState(() => new Date());
   const [endTime, setEndTime] = useState(
-    new Date(Date.now() + 2 * 60 * 60 * 1000) // 2 hours from now
+    () => new Date(Date.now() + 2 * 60 * 60 * 1000) // 2 hours from now
   );
   const [submitting, setSubmitting] = useState(false);
   const [address, setAddress] = useState('');
-  const [suggestions, setSuggestions] = useState<Array<{ description: string; place_id: string }>>([]);
+  const [suggestions, setSuggestions] = useState<{ description: string; place_id: string }[]>([]);
   const debounceRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
   const mapRef = React.useRef<MapView>(null);
 

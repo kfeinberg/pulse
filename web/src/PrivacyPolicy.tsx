@@ -5,7 +5,7 @@ export function PrivacyPolicy() {
         <div style={styles.header}>
           <a href="/" style={styles.backLink}>&larr; Back to Pulse</a>
           <h1 style={styles.title}>Privacy Policy</h1>
-          <p style={styles.lastUpdated}>Last updated: April 8, 2026</p>
+          <p style={styles.lastUpdated}>Last updated: October 6, 2026</p>
         </div>
 
         <section style={styles.section}>
@@ -59,7 +59,7 @@ export function PrivacyPolicy() {
           <ul style={styles.list}>
             <li>Sign out at any time to stop providing data</li>
             <li>Deny location permissions to use the app without location features</li>
-            <li>Request deletion of your account and associated data by contacting us</li>
+            <li>Delete your account and associated data directly from the profile menu in the app</li>
           </ul>
         </section>
 

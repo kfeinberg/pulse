@@ -1,13 +1,13 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Dimensions, Animated, FlatList, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Animated, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useRouter } from 'expo-router';
-import { AppEvent, Report, ReportCategory } from '@/types';
+import { AppEvent, Report, ReportCategory, EventCategory, FlagReason } from '@/types';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport, deleteAccount, flagContent } from '@/services/firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_EMAIL } from '@/constants/categories';
-import { EventCategory, FlagReason } from '@/types';
+import { MAP_STYLE } from '@/constants/mapStyle';
 import { useAuth } from '@/contexts/AuthContext';
 import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
@@ -46,8 +46,6 @@ const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; 
   other: { emoji: '📍', label: 'Other', color: '#95a5a6' },
 };
 
-import { MAP_STYLE } from '@/constants/mapStyle';
-
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3958.8;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -63,10 +61,12 @@ export default function MapScreen() {
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
+  const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeChecked, setWelcomeChecked] = useState(false);
-  const splashOpacity = useRef(new Animated.Value(1)).current;
-  const dotScale = useRef(new Animated.Value(1)).current;
+  const [splashOpacity] = useState(() => new Animated.Value(1));
+  const [dotScale] = useState(() => new Animated.Value(1));
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
   const [showListView, setShowListView] = useState(false);
@@ -75,7 +75,7 @@ export default function MapScreen() {
   const [mapPickerStep, setMapPickerStep] = useState<'main' | 'day' | 'time'>('main');
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
-  const filterAnim = useRef(new Animated.Value(0)).current;
+  const [filterAnim] = useState(() => new Animated.Value(0));
   const [activeCategories, setActiveCategories] = useState<Set<EventCategory>>(
     new Set(CATEGORY_LIST)
   );
@@ -124,6 +124,12 @@ export default function MapScreen() {
       ]
     );
   };
+
+  // Keep relative-time labels and future-event affordances current.
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   // Check if user has seen welcome before
   useEffect(() => {
@@ -226,7 +232,7 @@ export default function MapScreen() {
   const listDayOptions = useMemo(() => {
     const seen = new Set<string>();
     const now = listTimelineSnaps[0].time;
-    return listTimelineSnaps.reduce<Array<{ key: string; label: string; firstIndex: number }>>(
+    return listTimelineSnaps.reduce<{ key: string; label: string; firstIndex: number }[]>(
       (options, snap, index) => {
         const key = getDateKey(snap.time);
         if (!seen.has(key)) {
@@ -345,8 +351,6 @@ export default function MapScreen() {
     }
   }, [user]);
 
-  const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
-
   useEffect(() => {
     let unsubscribe: (() => void) | undefined;
 
@@ -377,6 +381,8 @@ export default function MapScreen() {
       const notEnded = event.endTime.toMillis() > selectedTime;
       return started && notEnded && activeCategories.has(event.category);
     });
+    // Keep the mutable map/list event state aligned with the selected instant.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setEvents(filtered);
     // Clear selected event if it's no longer visible
     setSelectedEvent((prev) => {
@@ -443,7 +449,7 @@ export default function MapScreen() {
   }, [selectedEvent, router]);
 
   const listEvents = useMemo(() => {
-    const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
+    const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? currentTime;
     const filtered = allEvents.filter((event) =>
       event.startTime.toMillis() <= selectedTime &&
       event.endTime.toMillis() > selectedTime &&
@@ -456,16 +462,12 @@ export default function MapScreen() {
       getDistance(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude) -
       getDistance(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude)
     );
-  }, [allEvents, activeCategories, listTimelineIndex, listTimelineSnaps, userLocation]);
+  }, [allEvents, activeCategories, listTimelineIndex, listTimelineSnaps, userLocation, currentTime]);
 
   const eventsForMap = useMemo(() => {
     if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
     return [...events, selectedEvent];
   }, [events, selectedEvent]);
-
-  const handleAdminPress = () => {
-    router.push('/admin');
-  };
 
   const formatDistance = (event: AppEvent): string | null => {
     if (!userLocation) return null;
@@ -671,7 +673,7 @@ export default function MapScreen() {
               </View>
             </View>
           </TouchableOpacity>
-          {selectedEvent.startTime.toMillis() > Date.now() ? (
+          {selectedEvent.startTime.toMillis() > currentTime ? (
             <View style={styles.interestedRow}>
               <TouchableOpacity
                 style={[styles.interestedButton, interestedMap[selectedEvent.id] && styles.interestedButtonActive]}
@@ -1038,7 +1040,7 @@ export default function MapScreen() {
                 </Text>
                 <Text style={styles.previewTime}>
                   {selectedReport.userName} · {(() => {
-                    const mins = Math.floor((Date.now() - selectedReport.createdAt.toMillis()) / 60000);
+                    const mins = Math.floor((currentTime - selectedReport.createdAt.toMillis()) / 60000);
                     if (mins < 1) return 'just now';
                     if (mins < 60) return `${mins}m ago`;
                     return `${Math.floor(mins / 60)}h ago`;
@@ -1161,7 +1163,7 @@ export default function MapScreen() {
         <View style={styles.modalBackdrop}>
           <View style={styles.reportForm}>
             <View style={styles.reportFormHeader}>
-              <Text style={styles.reportFormTitle}>What's happening here?</Text>
+              <Text style={styles.reportFormTitle}>{"What's happening here?"}</Text>
               <TouchableOpacity onPress={() => { setPendingPin(null); setReportText(''); setReportCategory('other'); }}>
                 <Text style={styles.reportFormClose}>✕</Text>
               </TouchableOpacity>
@@ -1210,7 +1212,7 @@ export default function MapScreen() {
                   setPendingPin(null);
                   setReportText('');
                   setReportCategory('other');
-                } catch (err) {
+                } catch {
                   Alert.alert('Error', 'Failed to drop pin');
                 } finally {
                   setSubmittingReport(false);
@@ -1232,7 +1234,7 @@ export default function MapScreen() {
               <Animated.View style={[styles.welcomeHeaderDot, { transform: [{ scale: dotScale }] }]} />
               <Text style={styles.welcomeTitle}>Pulse</Text>
             </View>
-            <Text style={styles.welcomeSubtitle}>What's happening in NYC right now</Text>
+            <Text style={styles.welcomeSubtitle}>{"What's happening in NYC right now"}</Text>
             <View style={styles.welcomeCategories}>
               {CATEGORY_LIST.map((key) => {
                 const cat = CATEGORIES[key];

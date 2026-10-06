@@ -18,7 +18,7 @@ export default function SignInScreen() {
     if (user && !needsProfile && !authLoading) {
       router.back();
     }
-  }, [user, needsProfile, loading]);
+  }, [user, needsProfile, authLoading]);
 
   const handleSignIn = async (method: 'apple' | 'google') => {
     setLoading(true);
@@ -111,7 +111,7 @@ export default function SignInScreen() {
     <View style={styles.container}>
       <View style={styles.content}>
         <Text style={styles.title}>Pulse</Text>
-        <Text style={styles.subtitle}>See what's happening in NYC right now</Text>
+        <Text style={styles.subtitle}>{"See what's happening in NYC right now"}</Text>
       </View>
 
       <View style={styles.bottom}>

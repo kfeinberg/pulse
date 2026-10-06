@@ -1,12 +1,11 @@
-import React, { useEffect, useState, useCallback } from 'react';
+import React, { useEffect, useState, useCallback, useMemo } from 'react';
 import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { CATEGORIES, ADMIN_EMAIL } from '@/constants/categories';
-import { EventCategory, Comment } from '@/types';
+import { EventCategory, Comment, FlagReason } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import { subscribeToComments, addComment, deleteEvent, flagContent } from '@/services/firebase';
 import { getHiddenContent, setHidden } from '@/services/votes';
-import { FlagReason } from '@/types';
 
 const FLAG_REASONS: { value: FlagReason; label: string }[] = [
   { value: 'spam', label: 'Spam' },
@@ -29,13 +28,13 @@ export default function EventDetailScreen() {
     sourceUrls: string;
   }>();
 
-  const urls: string[] = (() => {
+  const urls = useMemo((): string[] => {
     if (sourceUrls) {
       try { return JSON.parse(sourceUrls); } catch {}
     }
     if (sourceUrl) return [sourceUrl];
     return [];
-  })();
+  }, [sourceUrl, sourceUrls]);
 
   const { user, displayName } = useAuth();
   const router = useRouter();
@@ -43,10 +42,16 @@ export default function EventDetailScreen() {
   const [commentText, setCommentText] = useState('');
   const [submitting, setSubmitting] = useState(false);
   const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
+  const [currentTime, setCurrentTime] = useState(() => Date.now());
 
   const categoryConfig = CATEGORIES[category as EventCategory];
-  const start = new Date(Number(startTime));
-  const end = new Date(Number(endTime));
+  const start = useMemo(() => new Date(Number(startTime)), [startTime]);
+  const end = useMemo(() => new Date(Number(endTime)), [endTime]);
+
+  useEffect(() => {
+    const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
+    return () => clearInterval(timer);
+  }, []);
 
   useEffect(() => {
     if (!id) return;
@@ -155,7 +160,7 @@ export default function EventDetailScreen() {
   };
 
   const timeAgo = (millis: number) => {
-    const mins = Math.floor((Date.now() - millis) / 60000);
+    const mins = Math.floor((currentTime - millis) / 60000);
     if (mins < 1) return 'now';
     if (mins < 60) return `${mins}m`;
     return `${Math.floor(mins / 60)}h`;

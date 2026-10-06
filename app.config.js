@@ -2,7 +2,7 @@ export default {
   expo: {
     name: "Pulse",
     slug: "nyc-happenings",
-    version: "1.0.0",
+    version: "2.0.0",
     orientation: "portrait",
     icon: "./assets/images/icon.png",
     scheme: "current",
@@ -71,6 +71,7 @@ export default {
           color: "#ff5252",
         },
       ],
+      "./plugins/with-react-native-maps-google",
     ],
     experiments: {
       typedRoutes: true,
