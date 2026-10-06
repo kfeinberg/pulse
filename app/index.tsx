@@ -13,6 +13,22 @@ import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
 
 const WELCOME_KEY = 'pulse_welcomed';
+const HOUR_MS = 60 * 60 * 1000;
+const MAIN_TIMELINE_HOURS = 24;
+const UPCOMING_BROWSER_HOURS = 72;
+
+function getUpcomingDayLabel(eventTime: number, now: number): string {
+  const effectiveTime = Math.max(eventTime, now);
+  const date = new Date(effectiveTime);
+  const today = new Date(now);
+  today.setHours(0, 0, 0, 0);
+  const eventDay = new Date(date);
+  eventDay.setHours(0, 0, 0, 0);
+  const dayOffset = Math.round((eventDay.getTime() - today.getTime()) / (24 * HOUR_MS));
+  if (dayOffset === 0) return 'Today';
+  if (dayOffset === 1) return 'Tomorrow';
+  return date.toLocaleDateString('en-US', { weekday: 'long', month: 'short', day: 'numeric' });
+}
 
 const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
   live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
@@ -179,14 +195,14 @@ export default function MapScreen() {
   const timelineSnaps = useMemo(() => {
     const snaps: { label: string; time: Date }[] = [];
     const now = new Date();
-    const endTime = new Date(now.getTime() + 72 * 60 * 60 * 1000);
+    const endTime = new Date(now.getTime() + MAIN_TIMELINE_HOURS * HOUR_MS);
     snaps.push({ label: 'Now', time: now });
 
     const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
     const todayStart = new Date(now);
     todayStart.setHours(0, 0, 0, 0);
 
-    // Generate 2-hour snaps for the next 72 hours
+    // Generate 2-hour snaps for the main screen's next 24 hours
     const firstSnap = new Date(now);
     firstSnap.setMinutes(0, 0, 0);
     firstSnap.setHours(firstSnap.getHours() + (2 - (firstSnap.getHours() % 2)));
@@ -421,14 +437,27 @@ export default function MapScreen() {
     });
   }, [selectedEvent, router]);
 
-  const eventsSortedByDistance = useMemo(() => {
-    if (!userLocation) return events;
-    return [...events].sort((a, b) => {
-      const distA = getDistance(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude);
-      const distB = getDistance(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude);
-      return distA - distB;
-    });
-  }, [events, userLocation]);
+  const upcomingEvents = useMemo(() => {
+    const now = Date.now();
+    const horizon = now + UPCOMING_BROWSER_HOURS * HOUR_MS;
+    return allEvents
+      .filter((event) =>
+        event.endTime.toMillis() > now &&
+        event.startTime.toMillis() <= horizon &&
+        activeCategories.has(event.category)
+      )
+      .sort((a, b) => {
+        const timeDifference = a.startTime.toMillis() - b.startTime.toMillis();
+        if (timeDifference !== 0 || !userLocation) return timeDifference;
+        return getDistance(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude) -
+          getDistance(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude);
+      });
+  }, [allEvents, activeCategories, userLocation]);
+
+  const eventsForMap = useMemo(() => {
+    if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
+    return [...events, selectedEvent];
+  }, [events, selectedEvent]);
 
   const handleAdminPress = () => {
     router.push('/admin');
@@ -485,7 +514,7 @@ export default function MapScreen() {
         }}
         onPress={handleMapPress}
       >
-        {events.map((event) => {
+        {eventsForMap.map((event) => {
           const category = CATEGORIES[event.category];
           if (!category) return null;
           return (
@@ -725,58 +754,74 @@ export default function MapScreen() {
         onPress={() => setShowListView((v) => !v)}
         activeOpacity={0.8}
       >
-        <Text style={styles.listToggleText}>{showListView ? '◉' : '☰'}</Text>
+        <Text style={styles.listToggleText}>{showListView ? '◉' : '📅'}</Text>
       </TouchableOpacity>
 
       {showListView && (
         <View style={styles.listOverlay}>
           <View style={styles.listHeader}>
-            <Text style={styles.listTitle}>Nearby</Text>
+            <View>
+              <Text style={styles.listTitle}>Next 3 days</Text>
+              <Text style={styles.listSubtitle}>Happening or starting in the next 72 hours</Text>
+            </View>
             <TouchableOpacity onPress={() => setShowListView(false)}>
               <Text style={styles.listClose}>✕</Text>
             </TouchableOpacity>
           </View>
           <ScrollView style={styles.listScroll}>
-            {eventsSortedByDistance.map((event) => {
-              const category = CATEGORIES[event.category];
-              if (!category) return null;
-              return (
-                <TouchableOpacity
-                  key={event.id}
-                  style={styles.listItem}
-                  onPress={() => {
-                    setShowListView(false);
-                    setSelectedEvent(event);
-                    mapRef.current?.animateToRegion({
-                      latitude: event.latitude,
-                      longitude: event.longitude,
-                      latitudeDelta: 0.01,
-                      longitudeDelta: 0.01,
-                    }, 300);
-                  }}
-                  activeOpacity={0.7}
-                >
-                  <View style={[styles.listItemDot, { backgroundColor: category.color }]}>
-                    <Text style={styles.listItemEmoji}>{category.emoji}</Text>
-                  </View>
-                  <View style={styles.listItemContent}>
-                    <Text style={styles.listItemTitle} numberOfLines={1}>{event.title}</Text>
-                    {event.location ? (
-                      <Text style={styles.listItemLocation} numberOfLines={1}>{event.location}</Text>
-                    ) : null}
-                    <Text style={styles.listItemMeta}>
-                      {formatTime(event.startTime.toMillis())}
-                      {formatDistance(event) && (
-                        <Text style={styles.listItemDistance}> · {formatDistance(event)}</Text>
+            {(() => {
+              if (upcomingEvents.length === 0) {
+                return <Text style={styles.listEmpty}>No events found in the next 3 days.</Text>;
+              }
+              const now = Date.now();
+              let previousDay = '';
+              return upcomingEvents.map((event) => {
+                const category = CATEGORIES[event.category];
+                if (!category) return null;
+                const dayLabel = getUpcomingDayLabel(event.startTime.toMillis(), now);
+                const showDayHeader = dayLabel !== previousDay;
+                previousDay = dayLabel;
+                const happeningNow = event.startTime.toMillis() <= now && event.endTime.toMillis() > now;
+                return (
+                  <React.Fragment key={event.id}>
+                    {showDayHeader && <Text style={styles.listDayHeader}>{dayLabel}</Text>}
+                    <TouchableOpacity
+                      style={styles.listItem}
+                      onPress={() => {
+                        setShowListView(false);
+                        setSelectedEvent(event);
+                        mapRef.current?.animateToRegion({
+                          latitude: event.latitude,
+                          longitude: event.longitude,
+                          latitudeDelta: 0.01,
+                          longitudeDelta: 0.01,
+                        }, 300);
+                      }}
+                      activeOpacity={0.7}
+                    >
+                      <View style={[styles.listItemDot, { backgroundColor: category.color }]}>
+                        <Text style={styles.listItemEmoji}>{category.emoji}</Text>
+                      </View>
+                      <View style={styles.listItemContent}>
+                        <Text style={styles.listItemTitle} numberOfLines={1}>{event.title}</Text>
+                        {event.location ? (
+                          <Text style={styles.listItemLocation} numberOfLines={1}>{event.location}</Text>
+                        ) : null}
+                        <Text style={styles.listItemMeta}>
+                          {happeningNow ? 'Happening now' : formatTime(event.startTime.toMillis())}
+                          {formatDistance(event) && (
+                            <Text style={styles.listItemDistance}> · {formatDistance(event)}</Text>
+                          )}
+                        </Text>
+                      </View>
+                      {(event.interested ?? 0) > 0 && (
+                        <Text style={styles.listItemInterested}>⭐ {event.interested}</Text>
                       )}
-                    </Text>
-                  </View>
-                  {(event.interested ?? 0) > 0 && (
-                    <Text style={styles.listItemInterested}>⭐ {event.interested}</Text>
-                  )}
-                </TouchableOpacity>
-              );
-            })}
+                    </TouchableOpacity>
+                  </React.Fragment>
+                );
+              });
+            })()}
           </ScrollView>
           <TouchableOpacity
             style={styles.listMapButton}
@@ -1401,6 +1446,29 @@ const styles = StyleSheet.create({
     fontSize: 22,
     fontWeight: '700',
     color: '#1a1a1a',
+  },
+  listSubtitle: {
+    fontSize: 12,
+    color: '#777',
+    marginTop: 3,
+  },
+  listDayHeader: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#666',
+    textTransform: 'uppercase',
+    letterSpacing: 0.8,
+    paddingTop: 18,
+    paddingBottom: 8,
+    paddingHorizontal: 20,
+    backgroundColor: '#f8f8f8',
+  },
+  listEmpty: {
+    fontSize: 15,
+    color: '#777',
+    textAlign: 'center',
+    paddingHorizontal: 30,
+    paddingVertical: 48,
   },
   listClose: {
     fontSize: 20,
