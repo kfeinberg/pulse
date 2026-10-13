@@ -46,6 +46,27 @@ const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; 
   other: { emoji: '📍', label: 'Other', color: '#95a5a6' },
 };
 
+const MARKER_ANCHOR = { x: 0.5, y: 0.5 };
+const MARKER_CENTER_OFFSET = { x: 0, y: 0 };
+
+function MapPin({
+  emoji,
+  fillColor,
+  borderColor = '#fff',
+}: {
+  emoji: string;
+  fillColor: string;
+  borderColor?: string;
+}) {
+  return (
+    <View style={styles.markerWrapper}>
+      <View style={[styles.markerCircle, { backgroundColor: fillColor, borderColor }]}>
+        <Text style={styles.markerEmoji}>{emoji}</Text>
+      </View>
+    </View>
+  );
+}
+
 function getDistance(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3958.8;
   const dLat = (lat2 - lat1) * Math.PI / 180;
@@ -535,18 +556,15 @@ export default function MapScreen() {
                 latitude: event.latitude,
                 longitude: event.longitude,
               }}
+              anchor={MARKER_ANCHOR}
+              centerOffset={MARKER_CENTER_OFFSET}
               tracksViewChanges={false}
               onPress={(e) => {
                 e.stopPropagation();
                 handleMarkerPress(event);
               }}
             >
-              <View style={styles.markerWrapper}>
-                <View style={[styles.marker, { backgroundColor: category.color }]}>
-                  <Text style={styles.markerEmoji}>{category.emoji}</Text>
-                </View>
-                <View style={[styles.markerArrow, { borderTopColor: category.color }]} />
-              </View>
+              <MapPin emoji={category.emoji} fillColor={category.color} />
             </Marker>
           );
         })}
@@ -557,6 +575,8 @@ export default function MapScreen() {
             <Marker
               key={`report-${report.id}`}
               coordinate={{ latitude: report.latitude, longitude: report.longitude }}
+              anchor={MARKER_ANCHOR}
+              centerOffset={MARKER_CENTER_OFFSET}
               tracksViewChanges={false}
               onPress={(e) => {
                 e.stopPropagation();
@@ -564,24 +584,19 @@ export default function MapScreen() {
                 setSelectedEvent(null);
               }}
             >
-              <View style={styles.markerWrapper}>
-                <View style={[styles.reportMarker, { borderColor: cat.color }]}>
-                  <Text style={styles.markerEmoji}>{cat.emoji}</Text>
-                </View>
-                <View style={[styles.markerArrow, { borderTopColor: cat.color }]} />
-              </View>
+              <MapPin emoji={cat.emoji} fillColor="#202124" borderColor={cat.color} />
             </Marker>
           );
         })}
         {/* Pending pin */}
         {pendingPin && (
-          <Marker coordinate={pendingPin} tracksViewChanges={false}>
-            <View style={styles.markerWrapper}>
-              <View style={styles.pendingMarker}>
-                <Text style={styles.markerEmoji}>📍</Text>
-              </View>
-              <View style={[styles.markerArrow, { borderTopColor: '#ff5252' }]} />
-            </View>
+          <Marker
+            coordinate={pendingPin}
+            anchor={MARKER_ANCHOR}
+            centerOffset={MARKER_CENTER_OFFSET}
+            tracksViewChanges={false}
+          >
+            <MapPin emoji="📍" fillColor="#ff5252" />
           </Marker>
         )}
       </MapView>
@@ -1280,36 +1295,31 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(250, 238, 214, 0.10)',
   },
   markerWrapper: {
+    width: 48,
+    height: 48,
     alignItems: 'center',
     justifyContent: 'center',
   },
-  marker: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+  markerCircle: {
+    width: 42,
+    height: 42,
+    borderRadius: 21,
     alignItems: 'center',
     justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#fff',
+    borderWidth: 2.5,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
+    shadowOpacity: 0.25,
     shadowRadius: 3,
     elevation: 5,
   },
   markerEmoji: {
-    fontSize: 20,
-  },
-  markerArrow: {
-    width: 0,
-    height: 0,
-    borderLeftWidth: 8,
-    borderRightWidth: 8,
-    borderTopWidth: 8,
-    borderLeftColor: 'transparent',
-    borderRightColor: 'transparent',
-    alignSelf: 'center',
-    marginTop: -2,
+    fontSize: 22,
+    lineHeight: 27,
+    textAlign: 'center',
+    textAlignVertical: 'center',
+    includeFontPadding: false,
+    transform: [{ translateY: -1 }],
   },
   filterContainer: {
     position: 'absolute',
@@ -1914,35 +1924,6 @@ const styles = StyleSheet.create({
     color: 'rgba(255,255,255,0.4)',
     fontSize: 12,
     marginTop: 16,
-  },
-  reportMarker: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#1a1a1a',
-    borderWidth: 2,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 5,
-  },
-  pendingMarker: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#ff5252',
-    borderWidth: 2,
-    borderColor: '#fff',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 3,
-    elevation: 5,
   },
   confirmBtn: {
     flexDirection: 'row',

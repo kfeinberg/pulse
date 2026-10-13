@@ -7,6 +7,8 @@ export interface ScrapedEvent {
   category?: "popup" | "free_stuff" | "happening" | "professional" | "bars" | "clubs" | "concerts";
   sourceUrl: string;
   sourceName: string;
+  temporalStatus: "scheduled_event" | "limited_run";
+  temporalEvidence: string;
   latitude?: number;
   longitude?: number;
 }

@@ -3,6 +3,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
 import { resolveEventLocation, type ResolvedLocation } from "./geocoder.js";
 import { isUsableEventUrl } from "./eventUrl.js";
+import { temporalExclusionReason } from "./temporalFilter.js";
 
 
 const EVENTS_COLLECTION = "events";
@@ -140,6 +141,11 @@ export async function writeScrapedEvents(
       console.log(`Skipped: no title`);
       return false;
     }
+    const temporalReason = temporalExclusionReason(event);
+    if (temporalReason) {
+      console.log(`Skipped before write (${temporalReason})`);
+      return false;
+    }
     return true;
   });
 
@@ -269,6 +275,8 @@ export async function writeScrapedEvents(
       description: event.description,
       location: event.location,
       category,
+      temporalStatus: event.temporalStatus,
+      temporalEvidence: event.temporalEvidence,
       ...resolvedLocationFields(geo),
       startTime: Timestamp.fromDate(startDate),
       endTime: Timestamp.fromDate(endDate),

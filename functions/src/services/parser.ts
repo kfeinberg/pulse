@@ -2,6 +2,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
 import { EXTRACTION_PROMPT } from "./extractionPrompt.js";
 import { resolveEventbriteUrl } from "./eventUrl.js";
+import { temporalExclusionReason } from "./temporalFilter.js";
 
 
 export function stripHtml(html: string): string {
@@ -78,19 +79,23 @@ function isVagueLocation(location: string): boolean {
   return VAGUE_LOCATION_PATTERNS.some((p) => p.test(location));
 }
 
+interface ExtractedEvent {
+  title: string;
+  description: string;
+  date: string;
+  startTime: string;
+  endTime: string;
+  location: string;
+  category: string;
+  url?: string;
+  temporalStatus?: string;
+  temporalEvidence?: string;
+}
+
 async function resolveVagueLocations(
-  events: Array<{
-    title: string;
-    description: string;
-    date: string;
-    startTime: string;
-    endTime: string;
-    location: string;
-    category: string;
-    url?: string;
-  }>,
+  events: ExtractedEvent[],
   client: Anthropic
-): Promise<typeof events> {
+): Promise<ExtractedEvent[]> {
   const vagueEvents = events.filter((e) => isVagueLocation(e.location));
   if (vagueEvents.length === 0) return events;
 
@@ -185,16 +190,7 @@ async function sendToClaude(
   // Strip markdown fences if present
   const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
 
-  let parsed: Array<{
-    title: string;
-    description: string;
-    date: string;
-    startTime: string;
-    endTime: string;
-    location: string;
-    category: string;
-    url?: string;
-  }>;
+  let parsed: ExtractedEvent[];
 
   try {
     parsed = JSON.parse(cleaned);
@@ -208,8 +204,22 @@ async function sendToClaude(
     return [];
   }
 
-  // Second pass: resolve vague multi-location events
-  const resolvedEvents = await resolveVagueLocations(parsed, client);
+  // The extractor must make an explicit temporal-vs-permanent decision for
+  // every candidate. Fail closed when that decision or its source evidence is
+  // absent: a dated admission slot for a permanent attraction is not an event.
+  const temporalEvents = parsed.filter((event) => {
+    const reason = temporalExclusionReason(event);
+    if (!reason) return true;
+    console.log(`Skipped non-temporal candidate (${reason})`);
+    return false;
+  });
+  console.log(
+    `Temporal filter: ${temporalEvents.length}/${parsed.length} candidates kept`
+  );
+
+  // Resolve locations only after the temporal gate so permanent attractions do
+  // not trigger extra model calls.
+  const resolvedEvents = await resolveVagueLocations(temporalEvents, client);
 
   return Promise.all(resolvedEvents.map(async (e) => {
     const dateStr = e.date || new Date().toISOString().split("T")[0];
@@ -274,6 +284,8 @@ async function sendToClaude(
       category: (["popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
       sourceUrl: resolvedSourceUrl,
       sourceName,
+      temporalStatus: e.temporalStatus as ScrapedEvent["temporalStatus"],
+      temporalEvidence: e.temporalEvidence!.trim(),
     };
   }));
 }

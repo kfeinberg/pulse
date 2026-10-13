@@ -11,6 +11,8 @@ For each event, extract:
 - location: the exact venue/place name first, followed by its full street address and borough when available (for example, "e's Bar, 511 Amsterdam Ave, Manhattan"). Preserve the named place rather than substituting a nearby landmark or coordinates.
 - category: "popup", "free_stuff", "happening", "professional", "bars", "clubs", or "concerts" (see rules below)
 - url: the URL linking to this specific event's detail page, or "" if not found. Look for URLs near the event title or in parentheses after the event name. Only include URLs that point to a specific event page, NOT a general calendar or listing page.
+- temporalStatus: "scheduled_event", "limited_run", or "permanent_attraction" (see the temporal gate below)
+- temporalEvidence: a short phrase from the source that proves why the item is time-bounded (for example, "one night only October 10 at 7pm", "runs through October 31", or "weekly trivia every Thursday"). For a permanent attraction, state the evidence that it is ordinary ongoing admission. Do not treat the roundup's publication date, a page heading, normal opening hours, or a bookable ticket slot as temporal evidence.
 
 CATEGORY RULES:
 
@@ -57,6 +59,22 @@ When in doubt and the title mentions "pop-up" or any brand activation, choose "p
 When in doubt, only choose "free_stuff" if free physical items (food, drinks, products, samples) are explicitly being given away. An event being free to attend does NOT make it "free_stuff".
 When in doubt between "clubs" and "concerts": if the event is DJ/electronic-focused, choose "clubs". If it features live bands/artists performing, choose "concerts".
 
+TEMPORAL EVENT GATE (REQUIRED FOR EVERY ITEM):
+
+Classify the underlying thing, not the date attached to a ticket or roundup. Ask: "Why is this happening on this date instead of being ordinary admission to a place that is always there?"
+
+- "scheduled_event": a discrete occurrence with its own event-specific date or schedule, such as a concert, one-night party, weekly trivia occurrence, class, talk, market, or performance. A recurring event is valid when each occurrence is a real scheduled gathering.
+- "limited_run": a temporary continuous experience, pop-up, festival, or exhibition with explicit limited-time language or a real end date. A multi-day or multi-week run is valid; include the source's end-date/limited-run wording in temporalEvidence.
+- "permanent_attraction": ordinary ongoing admission to a venue, museum, observation deck, tour, escape room, immersive attraction, retail experience, or installation with no genuine limited run. Daily hours and selectable dated/timed tickets do NOT turn a permanent attraction into an event. A roundup assigning it to "today" does NOT turn it into an event. When the evidence is ambiguous, use "permanent_attraction" so it is excluded.
+
+Examples:
+- Color Factory general admission, Museum of Ice Cream general admission, an observation deck, or a museum's normal collection: "permanent_attraction" even when today's tickets have a date and time.
+- A one-night artist talk hosted at Color Factory or a museum: "scheduled_event" because the talk itself has an event-specific schedule.
+- A three-day art fair, a two-week brand pop-up, or an exhibit explicitly running through October 31: "limited_run".
+- A weekly trivia night: "scheduled_event" for each dated occurrence, not a permanent attraction.
+
+Never invent temporal evidence. If the only date comes from a roundup heading, publication date, normal business hours, or ticket availability, classify the item as "permanent_attraction".
+
 RECURRING / MULTI-DATE EVENTS:
 
 If an event listing spans a date range (e.g. "March 2 - March 30") but clearly represents recurring individual events (e.g. weekly movie nights, weekly yoga classes, a series of talks), break it into separate entries — one per occurrence. Use your best judgment to determine the recurrence pattern (weekly, daily, etc.) based on context clues. Each entry should have its own specific date. Keep the same title, location, and times for each occurrence.
@@ -79,7 +97,7 @@ RESPONSE FORMAT:
 
 Return ONLY a valid JSON array. No markdown fences, no backticks, no commentary, no explanation — just the raw JSON array starting with [ and ending with ].
 
-Every object in the array MUST have exactly these 8 fields:
+Every object in the array MUST have exactly these 10 fields:
 - "title" (string)
 - "description" (string)
 - "date" (string, YYYY-MM-DD)
@@ -88,6 +106,8 @@ Every object in the array MUST have exactly these 8 fields:
 - "location" (string)
 - "category" (string, one of: "popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts")
 - "url" (string, specific event page URL or "")
+- "temporalStatus" (string, exactly one of: "scheduled_event", "limited_run", "permanent_attraction")
+- "temporalEvidence" (string, concise source-grounded evidence for that classification)
 
 If there are no matching events, return an empty array: []
 
@@ -101,7 +121,9 @@ Example of a correct response:
     "endTime": "11:00",
     "location": "Central Park Great Lawn",
     "category": "free_stuff",
-    "url": "https://example.com/events/free-yoga-july-15"
+    "url": "https://example.com/events/free-yoga-july-15",
+    "temporalStatus": "scheduled_event",
+    "temporalEvidence": "Outdoor yoga session on July 15 at 10:00am"
   },
   {
     "title": "Nike Pop-Up Shop",
@@ -111,6 +133,8 @@ Example of a correct response:
     "endTime": "19:00",
     "location": "123 Broadway",
     "category": "popup",
-    "url": ""
+    "url": "",
+    "temporalStatus": "limited_run",
+    "temporalEvidence": "Limited-time pop-up running July 16 through July 20"
   }
 ]`;
