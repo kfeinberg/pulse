@@ -9,7 +9,7 @@ For each event, extract:
 - startTime: start time in HH:MM format (24h), or "" if unknown
 - endTime: end time in HH:MM format (24h), or "" if unknown
 - location: the exact venue/place name first, followed by its full street address and borough when available (for example, "e's Bar, 511 Amsterdam Ave, Manhattan"). Preserve the named place rather than substituting a nearby landmark or coordinates.
-- category: "popup", "free_stuff", "happening", "professional", "bars", "clubs", or "concerts" (see rules below)
+- category: "popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts", "farmers_market", "street_fair", or "trick_or_treat" (see rules below)
 - url: the URL linking to this specific event's detail page, or "" if not found. Look for URLs near the event title or in parentheses after the event name. Only include URLs that point to a specific event page, NOT a general calendar or listing page.
 - temporalStatus: "scheduled_event", "limited_run", or "permanent_attraction" (see the temporal gate below)
 - temporalEvidence: a short phrase from the source that proves why the item is time-bounded (for example, "one night only October 10 at 7pm", "runs through October 31", or "weekly trivia every Thursday"). For a permanent attraction, state the evidence that it is ordinary ongoing admission. Do not treat the roundup's publication date, a page heading, normal opening hours, or a bookable ticket slot as temporal evidence.
@@ -49,15 +49,36 @@ CATEGORY RULES:
 - Government hearings, City Council or agency committee/subcommittee meetings, public policy proceedings, and formal civic forums
 - Use this for serious work, industry, institutional, or government events rather than casual social meetups or entertainment
 
+"farmers_market":
+- Farmers markets, greenmarkets (including GrowNYC Greenmarkets), farmstands / farm stands, and other recurring outdoor markets whose main draw is farm/produce/food vendors selling directly to the public
+- The title or description contains "farmers market", "greenmarket", or "farmstand" (case-insensitive) → ALWAYS classify as "farmers_market", even if there are free samples (that is NOT "free_stuff") or it is described as a pop-up market (that is NOT "popup")
+- Do NOT use for flea markets, artisan/craft markets, night markets, or food festivals/halls (e.g. Smorgasburg) — those are "street_fair" or "happening" — unless the event is explicitly a farmers/greenmarket
+
+"street_fair":
+- Street fairs, street festivals, block parties, and outdoor fairs/festivals that close or line city streets with vendors, food stalls, and entertainment
+- Flea markets and outdoor artisan/craft markets held as street or open-air fairs
+- The title contains "street fair", "street festival", "block party", or "flea market" (case-insensitive) → ALWAYS classify as "street_fair"
+- Do NOT use for parades, charity walks/runs, races, or processions — those are "happening" — even when they travel on closed streets
+- Do NOT use for farmers markets/greenmarkets — use "farmers_market"
+
+"trick_or_treat":
+- NYC DOT "Trick-or-Streets" events and any event whose main activity is Halloween trick-or-treating for children/families on car-free streets, plazas, or blocks
+- Family- or child-focused Halloween block parties, Halloween costume parades for kids or pets, and neighborhood Halloween street celebrations centered on trick-or-treating
+- The title or description mentions "Trick-or-Streets" or "trick-or-treat"/"trick or treating" (case-insensitive) → ALWAYS classify as "trick_or_treat"
+- Do NOT use for adult Halloween parties, raves, DJ nights, or bar/club costume parties — those stay "clubs" or "bars". "Halloween" in the title alone is NOT enough: there must be trick-or-treating or a family street celebration
+- General Halloween attractions (haunted houses, spooky exhibits) without trick-or-treating are NOT "trick_or_treat"
+
 "happening":
 - Events that don't fit any of the above categories
 - Casual meetups, social gatherings, comedy shows, theatre, film screenings, general-interest talks, sports events
+- Parades, charity walks and runs, races, and processions that are not street fairs
 - Do NOT use for formal industry, professional, academic, policy, or government events; use "professional"
 - Anything notable happening in the city that doesn't fit the other categories
 
-When in doubt and the title mentions "pop-up" or any brand activation, choose "popup".
+When in doubt and the title mentions "pop-up" or any brand activation, choose "popup" (unless it is a farmers market/greenmarket/farmstand, which is always "farmers_market").
 When in doubt, only choose "free_stuff" if free physical items (food, drinks, products, samples) are explicitly being given away. An event being free to attend does NOT make it "free_stuff".
 When in doubt between "clubs" and "concerts": if the event is DJ/electronic-focused, choose "clubs". If it features live bands/artists performing, choose "concerts".
+When in doubt between "farmers_market" and "street_fair": if the vendors are primarily farms/produce/food growers (farmers market, greenmarket, farmstand), choose "farmers_market". If it is a general street fair, block party, or flea/artisan market, choose "street_fair".
 
 TEMPORAL EVENT GATE (REQUIRED FOR EVERY ITEM):
 
@@ -104,7 +125,7 @@ Every object in the array MUST have exactly these 10 fields:
 - "startTime" (string, HH:MM 24h format)
 - "endTime" (string, HH:MM 24h format)
 - "location" (string)
-- "category" (string, one of: "popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts")
+- "category" (string, one of: "popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts", "farmers_market", "street_fair", "trick_or_treat")
 - "url" (string, specific event page URL or "")
 - "temporalStatus" (string, exactly one of: "scheduled_event", "limited_run", "permanent_attraction")
 - "temporalEvidence" (string, concise source-grounded evidence for that classification)

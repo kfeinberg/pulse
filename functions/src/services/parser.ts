@@ -1,5 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { ScrapedEvent } from "../scrapers/base.js";
+import { EVENT_CATEGORIES, ScrapedEvent } from "../scrapers/base.js";
 import { EXTRACTION_PROMPT } from "./extractionPrompt.js";
 import { resolveEventbriteUrl } from "./eventUrl.js";
 import { temporalExclusionReason } from "./temporalFilter.js";
@@ -281,7 +281,7 @@ async function sendToClaude(
       startTimestamp,
       endTimestamp,
       location: e.location || "",
-      category: (["popup", "free_stuff", "happening", "professional", "bars", "clubs", "concerts"].includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
+      category: ((EVENT_CATEGORIES as readonly string[]).includes(e.category) ? e.category : "happening") as ScrapedEvent["category"],
       sourceUrl: resolvedSourceUrl,
       sourceName,
       temporalStatus: e.temporalStatus as ScrapedEvent["temporalStatus"],

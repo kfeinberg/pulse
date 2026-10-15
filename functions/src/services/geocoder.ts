@@ -6,6 +6,7 @@ const CACHE_COLLECTION = "geocodingCache";
 const CACHE_VERSION = "nominatim-v1";
 const NYC_VIEWBOX = "-74.2591,40.9176,-73.7004,40.4774";
 const REQUEST_INTERVAL_MS = 1100;
+const RATE_LIMIT_COOLDOWN_MS = 5000;
 
 let lastRequestAt = 0;
 
@@ -96,16 +97,69 @@ function parseLocation(location: string): {
   return { placeName, address, addressOnly, houseNumber };
 }
 
+const BOROUGH_PATTERN = /\b(Manhattan|Brooklyn|Queens|The Bronx|Bronx|Staten Island)\b/i;
+
+// Street-segment and intersection locations (street fairs, farmers markets,
+// Trick-or-Streets) have no house number for Nominatim to anchor on, and the
+// raw phrasing ("X between A and B") returns nothing. Junction phrasing
+// ("A & X") hits OSM junction nodes when they exist; the bare street name
+// resolves to the street itself as a last-resort centroid.
+export function segmentQueries(location: string): {
+  junctionQueries: string[];
+  streetOnlyQuery: string | null;
+} {
+  const none = { junctionQueries: [] as string[], streetOnlyQuery: null };
+  const boroughMatch = location.match(BOROUGH_PATTERN);
+  const area = boroughMatch
+    ? boroughMatch[1].replace(/^the\s+/i, "").replace(/\b\w/g, (c) => c.toUpperCase())
+    : "New York";
+  const suffix = `${area}, New York, NY`;
+
+  const segment = location.match(
+    /([A-Za-z0-9 .'-]+?)\s+(?:between|from)\s+([A-Za-z0-9 .'-]+?)\s+(?:and|to)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
+  );
+  if (segment) {
+    const street = segment[1].trim();
+    const crosses = [segment[2].trim(), segment[3].trim()].filter(
+      (cross) => cross && !/^dead\s+end$/i.test(cross)
+    );
+    if (!street) return none;
+    const junctionQueries = crosses.flatMap((cross) => [
+      `${cross} & ${street}, ${suffix}`,
+      `${street} & ${cross}, ${suffix}`,
+    ]);
+    return { junctionQueries, streetOnlyQuery: `${street}, ${suffix}` };
+  }
+
+  const intersection = location.match(
+    /([A-Za-z0-9 .'-]+?)\s+(?:&|at)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
+  );
+  if (intersection) {
+    const a = intersection[1].trim();
+    const b = intersection[2].trim();
+    if (!a || !b || /^dead\s+end$/i.test(b)) return none;
+    return {
+      junctionQueries: [`${a} & ${b}, ${suffix}`, `${b} & ${a}, ${suffix}`],
+      streetOnlyQuery: `${a}, ${suffix}`,
+    };
+  }
+
+  return none;
+}
+
 function buildQueries(event: ScrapedEvent): string[] {
   const location = event.location.replace(/\s+/g, " ").trim();
   const { placeName, address } = parseLocation(location);
   const sourceHint = getSourceHint(event.sourceUrl);
+  const { junctionQueries, streetOnlyQuery } = segmentQueries(location);
   const queries = [
+    ...junctionQueries,
     sourceHint ? `${location}, ${sourceHint}, NY` : null,
     `${location}, New York, NY`,
     placeName && sourceHint ? `${placeName}, ${sourceHint}, NY` : null,
     placeName ? `${placeName}, New York, NY` : null,
     address ? `${address}, New York, NY` : null,
+    streetOnlyQuery,
   ].filter((query): query is string => Boolean(query));
 
   return [...new Set(queries.map((query) => query.replace(/\s+/g, " ").trim()))];
@@ -159,6 +213,13 @@ function scoreResult(
   return score;
 }
 
+export class RateLimitedError extends Error {
+  constructor(status: number) {
+    super(`Nominatim returned ${status}`);
+    this.name = "RateLimitedError";
+  }
+}
+
 async function search(query: string): Promise<NominatimResult[]> {
   const waitMs = REQUEST_INTERVAL_MS - (Date.now() - lastRequestAt);
   if (waitMs > 0) {
@@ -183,6 +244,9 @@ async function search(query: string): Promise<NominatimResult[]> {
     },
   });
   if (!response.ok) {
+    if (response.status === 429) {
+      throw new RateLimitedError(response.status);
+    }
     throw new Error(`Nominatim returned ${response.status}`);
   }
   return (await response.json()) as NominatimResult[];
@@ -246,6 +310,15 @@ export async function resolveEventLocation(
       return resolved;
     } catch (error) {
       console.warn(`Location lookup failed for "${query}":`, error);
+      if (error instanceof RateLimitedError) {
+        // Nominatim is throttling this egress IP (e.g. overlapping scrape
+        // invocations). Hammering the remaining fallback queries only
+        // extends the block; give up on this event and pause so subsequent
+        // events back off instead of each issuing a full query storm.
+        console.warn("Nominatim rate limited; skipping remaining queries for this event");
+        await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_COOLDOWN_MS));
+        break;
+      }
     }
   }
 
