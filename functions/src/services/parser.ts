@@ -1,6 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { EVENT_CATEGORIES, ScrapedEvent } from "../scrapers/base.js";
-import { EXTRACTION_PROMPT } from "./extractionPrompt.js";
+import { EXTRACTION_MODEL, EXTRACTION_PROMPT } from "./extractionPrompt.js";
+import type { ExtractionCache } from "./extractionCache.js";
 import { resolveEventbriteUrl } from "./eventUrl.js";
 import { temporalExclusionReason } from "./temporalFilter.js";
 
@@ -151,12 +152,15 @@ Example: ["Joe's Pizza, 7 Carmine St, New York, NY", "Joe's Pizza, 150 E 14th St
   return specificEvents;
 }
 
-async function sendToClaude(
+// Returns null when Claude's output cannot be parsed (including output cut
+// off at max_tokens), so callers can tell a failed extraction from a page
+// with no events.
+async function extractEvents(
   content: string,
   sourceName: string,
   sourceUrl: string,
   apiKey: string
-): Promise<ScrapedEvent[]> {
+): Promise<ScrapedEvent[] | null> {
   const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
 
   const truncatedContent = content.slice(0, 100_000);
@@ -167,7 +171,7 @@ async function sendToClaude(
   let message;
   try {
     message = await client.messages.create({
-      model: "claude-haiku-4-5-20251001",
+      model: EXTRACTION_MODEL,
       max_tokens: 32768,
       messages: [
         {
@@ -196,12 +200,12 @@ async function sendToClaude(
     parsed = JSON.parse(cleaned);
   } catch {
     console.error("Failed to parse Claude response:", text);
-    return [];
+    return null;
   }
 
   if (!Array.isArray(parsed)) {
     console.error("Claude response was not an array:", parsed);
-    return [];
+    return null;
   }
 
   // The extractor must make an explicit temporal-vs-permanent decision for
@@ -290,24 +294,34 @@ async function sendToClaude(
   }));
 }
 
-export async function parseEventsFromHtml(
-  html: string,
-  sourceName: string,
-  sourceUrl: string,
-  apiKey: string
-): Promise<ScrapedEvent[]> {
-  const strippedContent = stripHtml(html);
-  console.log(
-    `HTML: ${html.length} chars → stripped: ${strippedContent.length} chars`
-  );
-  return sendToClaude(strippedContent, sourceName, sourceUrl, apiKey);
-}
+const ITEM_SEPARATOR = "\n\n---\n\n";
 
-export async function parseEventsFromText(
-  text: string,
-  sourceName: string,
+// Sends the items this source has not extracted before to Claude as one
+// request, and returns the items that were sent (for overlaying source data
+// onto the parsed events) along with the events. The items' cache keys are
+// staged only when Claude's output parses, so a failed extraction is retried
+// on the next run.
+export async function parseNewItems<T>(
+  items: T[],
+  toText: (item: T) => string,
+  cache: ExtractionCache,
   sourceUrl: string,
   apiKey: string
-): Promise<ScrapedEvent[]> {
-  return sendToClaude(text, sourceName, sourceUrl, apiKey);
+): Promise<{ items: T[]; events: ScrapedEvent[] }> {
+  const fresh = await cache.filterNew(items, toText);
+  if (fresh.items.length === 0) {
+    return { items: [], events: [] };
+  }
+
+  const text = fresh.texts.join(ITEM_SEPARATOR);
+  console.log(
+    `Sending ${fresh.items.length} ${cache.sourceName} items to Claude (${text.length} chars)`
+  );
+  const events = await extractEvents(text, cache.sourceName, sourceUrl, apiKey);
+  if (!events) {
+    return { items: fresh.items, events: [] };
+  }
+
+  cache.stage(fresh.keys);
+  return { items: fresh.items, events };
 }

@@ -1,5 +1,6 @@
 import { EventCategory, EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText, stripHtml } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems, stripHtml } from "../../services/parser.js";
 import {
   addDays,
   etDateParts,
@@ -341,7 +342,7 @@ export async function fetchNycGovItems(nowMs: number): Promise<NycGovEventItem[]
 export function createNycGovScraper(apiKey: string): EventSource {
   return {
     name: "nycgov",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       const nowMs = Date.now();
       const weekdayFiltered = await fetchNycGovItems(nowMs);
       if (weekdayFiltered.length === 0) return [];
@@ -358,17 +359,19 @@ export function createNycGovScraper(apiKey: string): EventSource {
 
       const results: ScrapedEvent[] = [];
       for (const [day, dayItems] of byDay) {
-        const fullText = dayItems.map(itemToText).join("\n\n---\n\n");
-        console.log(
-          `Sending ${dayItems.length} NYC.gov events for ${day} to Claude (${fullText.length} chars)`
+        const { items: sentItems, events: parsed } = await parseNewItems(
+          dayItems,
+          itemToText,
+          cache,
+          EVENTS_PAGE_URL,
+          apiKey
         );
-        const parsed = await parseEventsFromText(fullText, "nycgov", EVENTS_PAGE_URL, apiKey);
         console.log(`NYC.gov ${day}: Claude extracted ${parsed.length} events`);
 
         const used = new Set<NycGovEventItem>();
         for (const event of parsed) {
           const parsedTitle = normalizeTitle(event.title);
-          const match = dayItems.find((item) => {
+          const match = sentItems.find((item) => {
             if (used.has(item)) return false;
             const sourceTitle = normalizeTitle(item.name);
             return (

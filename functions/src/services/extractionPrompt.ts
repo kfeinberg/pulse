@@ -1,3 +1,5 @@
+export const EXTRACTION_MODEL = "claude-haiku-4-5-20251001";
+
 export const EXTRACTION_PROMPT =
 
 `You are an event data extractor. Given cleaned text content from an events page, extract events into a JSON array.

@@ -8,7 +8,7 @@
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "test": "npm run build && node --test lib/scrapers/sites/*.test.js lib/services/*.test.js"
+    "test": "npm run build && node --test lib/scrapers/sites/*.test.js lib/services/*.test.js lib/services/pipeline/*.test.js"
   },
   "engines": {
     "node": "22"

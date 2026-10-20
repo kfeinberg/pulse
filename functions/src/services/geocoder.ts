@@ -252,6 +252,16 @@ async function search(query: string): Promise<NominatimResult[]> {
   return (await response.json()) as NominatimResult[];
 }
 
+// Thrown when no query found the place and at least one lookup failed with an
+// error (rate limit, network, server error) rather than returning no results,
+// so the place may still exist and the event is worth retrying later.
+export class LocationLookupError extends Error {
+  constructor(location: string, cause: unknown) {
+    super(`Location lookup failed for "${location}": ${String(cause)}`);
+    this.name = "LocationLookupError";
+  }
+}
+
 function cacheId(event: ScrapedEvent): string {
   const key = `${CACHE_VERSION}|${normalize(event.location)}|${getSourceHint(event.sourceUrl) || ""}`;
   return createHash("sha256").update(key).digest("hex");
@@ -275,6 +285,7 @@ export async function resolveEventLocation(
     return data;
   }
 
+  let lookupError: unknown = null;
   for (const query of buildQueries(event)) {
     try {
       const results = await search(query);
@@ -310,6 +321,7 @@ export async function resolveEventLocation(
       return resolved;
     } catch (error) {
       console.warn(`Location lookup failed for "${query}":`, error);
+      lookupError = error;
       if (error instanceof RateLimitedError) {
         // Nominatim is throttling this egress IP (e.g. overlapping scrape
         // invocations). Hammering the remaining fallback queries only
@@ -322,6 +334,9 @@ export async function resolveEventLocation(
     }
   }
 
+  if (lookupError) {
+    throw new LocationLookupError(event.location, lookupError);
+  }
   console.warn(`No exact NYC location found for "${event.location}"; event will not get a pin`);
   return null;
 }

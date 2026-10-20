@@ -1,3 +1,5 @@
+import type { ExtractionCache } from "../services/extractionCache.js";
+
 export const EVENT_CATEGORIES = [
   "popup",
   "free_stuff",
@@ -30,5 +32,5 @@ export interface ScrapedEvent {
 
 export interface EventSource {
   name: string;
-  scrape: () => Promise<ScrapedEvent[]>;
+  scrape: (cache: ExtractionCache) => Promise<ScrapedEvent[]>;
 }

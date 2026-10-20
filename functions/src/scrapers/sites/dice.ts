@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems } from "../../services/parser.js";
 
 const BROWSE_BASE =
   "https://dice.fm/browse/new_york-5bbf4db0f06331478e9b2c59";
@@ -98,7 +99,7 @@ async function fetchEventDetails(
 export function createDiceScraper(apiKey: string): EventSource {
   return {
     name: "dice",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       // Step 1: Fetch browse pages for today + next 2 days and extract event URLs
       const browseUrls = getBrowseUrls();
       const eventUrls: string[] = [];
@@ -146,7 +147,7 @@ export function createDiceScraper(apiKey: string): EventSource {
       );
 
       // Step 3: Format for Claude to categorize
-      const eventTexts = allDetails.filter(({ event }) => !!event.name && !!event.startDate).map(({ event, url }) => {
+      const eventToText = ({ event, url }: { event: DiceJsonLdEvent; url: string }) => {
         const locationParts: string[] = [];
         if (event.location?.name) locationParts.push(event.location.name);
         if (event.location?.address) locationParts.push(event.location.address);
@@ -173,16 +174,12 @@ export function createDiceScraper(apiKey: string): EventSource {
           `Location: ${locationParts.join(", ")}\n` +
           `URL: ${url}`
         );
-      });
+      };
 
-      const fullText = eventTexts.join("\n\n---\n\n");
-      console.log(
-        `Sending ${eventTexts.length} events to Claude (${fullText.length} chars)`
-      );
-
-      const parsedEvents = await parseEventsFromText(
-        fullText,
-        "dice",
+      const { items: sentDetails, events: parsedEvents } = await parseNewItems(
+        allDetails.filter(({ event }) => !!event.name && !!event.startDate),
+        eventToText,
+        cache,
         BROWSE_BASE,
         apiKey
       );
@@ -190,7 +187,7 @@ export function createDiceScraper(apiKey: string): EventSource {
 
       // Step 4: Overlay geo coordinates and individual event URLs from JSON-LD
       for (const parsed of parsedEvents) {
-        const match = allDetails.find(
+        const match = sentDetails.find(
           ({ event }) =>
             event.name &&
             parsed.title
