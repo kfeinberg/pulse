@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems } from "../../services/parser.js";
 
 const BASE_URL = "https://www.nycforfree.co/events";
 const FETCH_HEADERS = {
@@ -78,7 +79,7 @@ function parseWebflowEvents(html: string): WebflowEvent[] {
 export function createNycForFreeScraper(apiKey: string): EventSource {
   return {
     name: "nycforfree",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       console.log(`Fetching NYC for FREE: ${BASE_URL}`);
       const response = await fetch(BASE_URL, { headers: FETCH_HEADERS });
       if (!response.ok) {
@@ -95,7 +96,7 @@ export function createNycForFreeScraper(apiKey: string): EventSource {
         return [];
       }
 
-      const eventTexts = events.map((event) => {
+      const eventToText = (event: WebflowEvent) => {
         const location = [event.address, event.borough].filter(Boolean).join(", ");
         const eventUrl = `https://www.nycforfree.co/events/${event.slug}`;
         return (
@@ -108,15 +109,19 @@ export function createNycForFreeScraper(apiKey: string): EventSource {
           `Location: ${location || "NYC"}\n` +
           `URL: ${eventUrl}`
         );
-      });
+      };
 
-      const fullText = eventTexts.join("\n\n---\n\n");
-      console.log(`Sending ${events.length} NYC for FREE events to Claude (${fullText.length} chars)`);
-      const results = await parseEventsFromText(fullText, "nycforfree", BASE_URL, apiKey);
+      const { items: sentEvents, events: results } = await parseNewItems(
+        events,
+        eventToText,
+        cache,
+        BASE_URL,
+        apiKey
+      );
       console.log(`NYC for FREE: Claude extracted ${results.length} events`);
 
       for (const parsed of results) {
-        const match = events.find(
+        const match = sentEvents.find(
           (event) =>
             parsed.title.toLowerCase().includes(event.title.toLowerCase().slice(0, 20)) ||
             event.title.toLowerCase().includes(parsed.title.toLowerCase().slice(0, 20))
