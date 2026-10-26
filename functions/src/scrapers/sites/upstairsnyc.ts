@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText, stripHtml } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems, stripHtml } from "../../services/parser.js";
 
 const BASE_URL = "https://www.upstairsnyc.org";
 // The curated "upcoming" page (Wix Events widget + latest Loop cards) and
@@ -12,6 +13,11 @@ const FETCH_HEADERS = {
 // Bound per-run work: each detail page is a large Wix page (~1MB raw).
 const MAX_DETAIL_PAGES = 12;
 const MAX_POST_CHARS = 8000;
+// The listing pages keep linking old Loop posts long after their events end.
+// Skip posts published more than this long ago (dates from the blog's RSS
+// feed) so a quiet stretch on the site costs no Claude calls.
+const FEED_URL = `${BASE_URL}/blog-feed.xml`;
+const MAX_POST_AGE_DAYS = 90;
 
 interface DetailEntry {
   url: string;
@@ -33,6 +39,36 @@ export function extractDetailUrls(html: string): string[] {
     }
   }
   return urls;
+}
+
+// Map each post URL in the Wix blog RSS feed to its publish time (Unix ms).
+export function extractFeedPublishDates(xml: string): Map<string, number> {
+  const dates = new Map<string, number>();
+  for (const item of xml.match(/<item>[\s\S]*?<\/item>/g) ?? []) {
+    const link = item.match(/<link>\s*([^<\s]+)\s*<\/link>/)?.[1];
+    const pubDate = item.match(/<pubDate>([^<]+)<\/pubDate>/)?.[1];
+    const publishedMs = pubDate ? Date.parse(pubDate) : NaN;
+    if (link && Number.isFinite(publishedMs)) {
+      dates.set(link.replace(/\/$/, ""), publishedMs);
+    }
+  }
+  return dates;
+}
+
+// Drop blog posts the feed says are older than maxAgeDays. Event pages and
+// posts missing from the feed are kept: the feed only lists recent posts.
+export function filterStalePosts(
+  urls: string[],
+  publishDates: Map<string, number>,
+  nowMs: number,
+  maxAgeDays: number
+): string[] {
+  const cutoffMs = nowMs - maxAgeDays * 24 * 60 * 60 * 1000;
+  return urls.filter((url) => {
+    if (!url.includes("/post/")) return true;
+    const publishedMs = publishDates.get(url);
+    return publishedMs === undefined || publishedMs >= cutoffMs;
+  });
 }
 
 export interface WixPostalAddress {
@@ -174,7 +210,7 @@ async function fetchHtml(url: string): Promise<string | null> {
 export function createUpstairsNycScraper(apiKey: string): EventSource {
   return {
     name: "upstairsnyc",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       // Step 1: collect detail-page URLs from the listing pages.
       const detailUrls: string[] = [];
       for (const listingUrl of LISTING_URLS) {
@@ -192,14 +228,24 @@ export function createUpstairsNycScraper(apiKey: string): EventSource {
         return [];
       }
 
+      const feedXml = await fetchHtml(FEED_URL);
+      const freshUrls = feedXml
+        ? filterStalePosts(detailUrls, extractFeedPublishDates(feedXml), Date.now(), MAX_POST_AGE_DAYS)
+        : detailUrls;
+      console.log(
+        `Upstairs NYC: ${detailUrls.length - freshUrls.length} posts older than ` +
+          `${MAX_POST_AGE_DAYS} days skipped, ${freshUrls.length} detail URLs remain`
+      );
+      if (freshUrls.length === 0) return [];
+
       // Wix Events pages carry exact structured data — scrape those first.
-      detailUrls.sort((a, b) => {
+      freshUrls.sort((a, b) => {
         const score = (url: string) => (url.includes("/events-1/") ? 0 : 1);
         return score(a) - score(b);
       });
-      const pagesToFetch = detailUrls.slice(0, MAX_DETAIL_PAGES);
+      const pagesToFetch = freshUrls.slice(0, MAX_DETAIL_PAGES);
       console.log(
-        `Fetching ${pagesToFetch.length}/${detailUrls.length} Upstairs NYC detail pages`
+        `Fetching ${pagesToFetch.length}/${freshUrls.length} Upstairs NYC detail pages`
       );
 
       // Step 2: turn each detail page into a text block for Claude.
@@ -244,13 +290,10 @@ export function createUpstairsNycScraper(apiKey: string): EventSource {
       }
 
       // Step 3: one Claude pass to extract + categorize, same as other sources.
-      const fullText = entries.map((e) => e.text).join("\n\n---\n\n");
-      console.log(
-        `Sending ${entries.length} Upstairs NYC blocks to Claude (${fullText.length} chars)`
-      );
-      const parsedEvents = await parseEventsFromText(
-        fullText,
-        "upstairsnyc",
+      const { items: sentEntries, events: parsedEvents } = await parseNewItems(
+        entries,
+        (entry) => entry.text,
+        cache,
         BASE_URL,
         apiKey
       );
@@ -262,7 +305,7 @@ export function createUpstairsNycScraper(apiKey: string): EventSource {
       // fallback is replaced with the detail page the event was extracted from.
       for (const parsed of parsedEvents) {
         const parsedPrefix = parsed.title.toLowerCase().slice(0, 20);
-        const match = entries.find((entry) => {
+        const match = sentEntries.find((entry) => {
           if (!entry.title) return false;
           const entryPrefix = entry.title.toLowerCase().slice(0, 20);
           return (

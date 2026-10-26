@@ -3,10 +3,28 @@ import { getAuth } from "firebase-admin/auth";
 import { getFirestore, Timestamp } from "firebase-admin/firestore";
 import { onSchedule } from "firebase-functions/v2/scheduler";
 import { onRequest, onCall, HttpsError } from "firebase-functions/v2/https";
+import { onTaskDispatched } from "firebase-functions/v2/tasks";
 import { defineSecret } from "firebase-functions/params";
 import { getAllSources } from "./scrapers/index.js";
 import { parsePoshPayload } from "./scrapers/sites/posh.js";
-import { writeScrapedEvents } from "./services/firestore.js";
+import { upsertEvent } from "./services/firestore.js";
+import { resolveEventLocation } from "./services/geocoder.js";
+import {
+  deleteExpiredExtractionCache,
+  itemKey,
+} from "./services/extractionCache.js";
+import {
+  COLLECTIONS,
+  deleteOldCheckpoints,
+  firestorePipelineStore,
+  type Stage,
+} from "./services/pipeline/checkpoints.js";
+import { runExtractStage, type SourceRunSummary } from "./services/pipeline/extract.js";
+import { cloudTasksEnqueuer, STAGE_QUEUES } from "./services/pipeline/queue.js";
+import { parseReplayRequest, replay } from "./services/pipeline/replay.js";
+import { runWithDeadLetter, parseStageTask, type StageDeps, type StageTask } from "./services/pipeline/stages.js";
+import { withRunLease, withStageLease, LeaseBusyError } from "./services/pipeline/leases.js";
+import { authorizeAdminHeader, isAdminToken } from "./services/admin.js";
 import { timingSafeEqual } from "node:crypto";
 import { Expo, ExpoPushMessage } from "expo-server-sdk";
 
@@ -26,33 +44,69 @@ function hasValidPoshToken(provided: string | undefined): boolean {
   );
 }
 
-async function runScraper(apiKey: string): Promise<string[]> {
-  const sources = getAllSources(apiKey);
+// Scheduled/relay work uses token-fenced leases. Busy duplicate deliveries
+// retry instead of acknowledging a run whose first worker may still fail.
+function stageDeps(apiKey: string): StageDeps {
+  return {
+    store: firestorePipelineStore(),
+    enqueue: cloudTasksEnqueuer(),
+    geocode: resolveEventLocation,
+    upsert: (event, geo, addId) => upsertEvent(event, geo, apiKey, addId),
+    exclusive: withStageLease,
+  };
+}
+
+function describe(summary: SourceRunSummary): string {
+  const base =
+    `${summary.source}: listed ${summary.listed}, extracted ${summary.extracted} new events ` +
+    `(${summary.skippedByCache} items already extracted), queued ${summary.queued}`;
+  return summary.health.tripped ? `${base}; HELD by circuit breaker: ${summary.health.reason}` : base;
+}
+
+// Runs the extract stage for every source (or one, with `only`). Each source
+// is isolated: a failure is recorded and the run moves on. Extracted items are
+// checkpointed and queued; gate, geocode and write happen in their own queues.
+// force: send every item to Claude even if it was extracted before.
+async function runScraper(
+  apiKey: string,
+  runId: string,
+  options: { force?: boolean; only?: string } = {}
+): Promise<string[]> {
+  const sources = getAllSources(apiKey).filter((s) => !options.only || s.name === options.only);
+  if (options.only && sources.length === 0) throw new Error(`Unknown source "${options.only}"`);
+  const deps = { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() };
   const results: string[] = [];
+  const ledger: Record<string, unknown> = {};
+  const failures: unknown[] = [];
 
   for (const source of sources) {
     try {
       console.log(`Scraping source: ${source.name}`);
-      const events = await source.scrape();
-      console.log(`Found ${events.length} events from ${source.name}`);
-
-      const added = await writeScrapedEvents(events, apiKey);
-      const msg = `${source.name}: found ${events.length} events, added ${added} new`;
-      console.log(msg);
-      results.push(msg);
+      const summary = await runExtractStage(source, runId, deps, { force: options.force });
+      ledger[source.name] = summary;
+      results.push(describe(summary));
+      console.log(describe(summary));
     } catch (error) {
       const msg = `${source.name}: error — ${error}`;
+      ledger[source.name] = { error: String(error) };
+      failures.push(error);
       console.error(msg);
       results.push(msg);
     }
   }
 
+  await getFirestore().collection(COLLECTIONS.runs).doc(runId).set(
+    { createdAt: Timestamp.now(), sources: JSON.parse(JSON.stringify(ledger)) },
+    { mergeFields: ["createdAt", "sources"] }
+  );
   console.log(JSON.stringify({
     message: "Scrape run complete",
+    runId,
     summary: results,
     timestamp: new Date().toISOString(),
   }));
 
+  if (failures.length) throw new AggregateError(failures, `${failures.length} source(s) failed; durable successful checkpoints are preserved`);
   return results;
 }
 
@@ -64,24 +118,38 @@ export const dailyScrape = onSchedule(
     timeoutSeconds: 1800,
     memory: "2GiB",
     secrets: [anthropicApiKey],
+    retryCount: 3,
+    minBackoffSeconds: 60,
+    maxBackoffSeconds: 300,
   },
-  async () => {
-    const results = await runScraper(anthropicApiKey.value());
-    console.log("Daily scrape complete:", results);
+  async (event) => {
+    // A delayed retry still belongs to its scheduled day, not today's date.
+    const etDate = new Date(event.scheduleTime).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+    const lockId = `dailyScrape-${etDate}`;
+    const result = await withRunLease(lockId, () => runScraper(anthropicApiKey.value(), lockId));
+    console.log(result.duplicate ? `Skipping completed dailyScrape ${etDate}` : "Daily scrape complete");
   }
 );
 
-// HTTP trigger for manual testing — includes full pipeline debug
+// HTTP trigger for manual testing — includes full pipeline debug.
+// ?force=1 re-extracts items that were already extracted; ?source=<name>
+// runs only that source.
 export const scrapeNow = onRequest(
   { secrets: [anthropicApiKey], timeoutSeconds: 1800, memory: "2GiB" },
-  async (_req, res) => {
+  async (req, res) => {
+    if (!(await authorizeAdminHeader(req.header("authorization"), (token) => getAuth().verifyIdToken(token, true)))) {
+      res.status(403).json({ error: "Admin only" });
+      return;
+    }
     const debug: Record<string, unknown> = {};
     const apiKey = anthropicApiKey.value();
     debug.apiKeyPresent = !!apiKey;
 
     // Run full pipeline
     try {
-      const results = await runScraper(apiKey);
+      const only = typeof req.query.source === "string" ? req.query.source : undefined;
+      const runId = `manual-${new Date().toISOString()}`;
+      const results = await runScraper(apiKey, runId, { force: req.query.force === "1", only });
       debug.results = results;
     } catch (err) {
       debug.scraperError = String(err);
@@ -106,38 +174,97 @@ export const ingestPoshEvents = onRequest(
       return;
     }
 
+    // Fingerprint includes the extraction prompt/model/parser generation.
+    const payloadHash = itemKey("posh-payload", JSON.stringify(req.body?.events ?? null));
+    const lockId = `posh-${payloadHash.slice(0, 32)}`;
     const auditRef = getFirestore().collection("_scraperAudits").doc("posh");
     const startedAt = Date.now();
     try {
-      const events = await parsePoshPayload(req.body?.events, anthropicApiKey.value());
-      const added = await writeScrapedEvents(events, anthropicApiKey.value());
-      const result = {
-        source: "posh",
-        status: events.length > 0 ? "ok" : "empty",
-        count: events.length,
-        added,
-        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
-        samples: events.slice(0, 5).map((event) => ({
-          title: event.title,
-          location: event.location,
-          sourceUrl: event.sourceUrl,
-        })),
-        completedAt: Timestamp.now(),
-      };
-      await auditRef.set(result);
-      res.json(result);
+      const leased = await withRunLease(lockId, async () => {
+        const summary = await runExtractStage({ name: "posh", scrape: (cache) => parsePoshPayload(req.body?.events, anthropicApiKey.value(), cache) }, lockId,
+          { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() }, { breaker: false });
+        const result = {
+          source: "posh",
+          status: summary.extracted > 0 || summary.skippedByCache > 0 ? "ok" : "empty",
+          count: summary.extracted,
+          alreadyExtracted: summary.skippedByCache,
+          queued: summary.queued,
+          elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          samples: summary.samples ?? [],
+          completedAt: Timestamp.now(),
+        };
+        await auditRef.set(result);
+        return result;
+      });
+      res.json(leased.duplicate ? { source: "posh", status: "duplicate" } : leased.result);
     } catch (error) {
+      if (error instanceof LeaseBusyError) {
+        res.status(503).json({ source: "posh", status: "busy", error: "Retry this delivery later" });
+        return;
+      }
       const result = {
-        source: "posh",
-        status: "error",
-        error: String(error),
-        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
-        completedAt: Timestamp.now(),
+        source: "posh", status: "error", error: String(error),
+        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), completedAt: Timestamp.now(),
       };
       await auditRef.set(result);
       console.error("Posh ingestion failed:", error);
       res.status(500).json(result);
     }
+  }
+);
+
+// Pipeline stage workers. Each item moves through gate → geocode → write as
+// its own task, with per-stage retries; the last failed attempt quarantines
+// the item (dead letter) instead of retrying forever.
+function stageWorker(stage: Stage) {
+  const queue = STAGE_QUEUES[stage];
+  return onTaskDispatched<StageTask>(
+    {
+      invoker: "private",
+      retryConfig: queue.retryConfig,
+      rateLimits: queue.rateLimits,
+      timeoutSeconds: queue.timeoutSeconds,
+      secrets: stage === "write" ? [anthropicApiKey] : [],
+    },
+    async (request) => {
+      const deps = stageDeps(stage === "write" ? anthropicApiKey.value() : "");
+      const task = parseStageTask(request.data);
+      const result = await runWithDeadLetter(
+        stage, task, request.retryCount, queue.retryConfig.maxAttempts, deps
+      );
+      console.log(`[${stage}] ${request.data.inputId}: ${JSON.stringify(result)}`);
+    }
+  );
+}
+
+export const pipelineGate = stageWorker("gate");
+export const pipelineGeocode = stageWorker("geocode");
+export const pipelineWrite = stageWorker("write");
+
+// Admin-only replay. { stage: "gate" | "geocode" | "write", source?, since?,
+// until?, inputId?, releaseQuarantine? } reruns that stage (and everything
+// after it) from its saved inputs. { stage: "extract", source, force? }
+// re-fetches and re-extracts one source.
+export const replayStage = onCall(
+  { secrets: [anthropicApiKey], timeoutSeconds: 1800, memory: "2GiB" },
+  async (request) => {
+    const token = request.auth?.token;
+    if (!isAdminToken(token)) {
+      throw new HttpsError("permission-denied", "Admin only");
+    }
+    const body = (request.data ?? {}) as Record<string, unknown>;
+    if (body.stage === "extract") {
+      if (typeof body.source !== "string") throw new HttpsError("invalid-argument", "source is required");
+      const runId = `replay-${new Date().toISOString()}`;
+      return { results: await runScraper(anthropicApiKey.value(), runId, { only: body.source, force: body.force === true }) };
+    }
+    let parsed;
+    try {
+      parsed = parseReplayRequest(body);
+    } catch (error) {
+      throw new HttpsError("invalid-argument", String(error));
+    }
+    return replay(parsed, { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() });
   }
 );
 
@@ -149,6 +276,15 @@ export const dailyCleanup = onSchedule(
     timeoutSeconds: 120,
   },
   async () => {
+    try {
+      const expired = await deleteExpiredExtractionCache();
+      console.log(`Cleaned up ${expired} expired extraction cache entries`);
+      const checkpoints = await deleteOldCheckpoints(14);
+      console.log(`Cleaned up ${checkpoints} pipeline checkpoints older than 14 days`);
+    } catch (error) {
+      console.error("Extraction cache / checkpoint cleanup failed:", error);
+    }
+
     const db = getFirestore();
     const now = new Date();
     const snapshot = await db

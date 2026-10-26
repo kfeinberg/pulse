@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromHtml } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems, stripHtml } from "../../services/parser.js";
 
 const BASE_URL = "https://www.theskint.com/";
 const FETCH_HEADERS = {
@@ -10,7 +11,7 @@ const FETCH_HEADERS = {
 export function createTheSkintScraper(apiKey: string): EventSource {
   return {
     name: "theskint",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       console.log(`Fetching The Skint: ${BASE_URL}`);
       const response = await fetch(BASE_URL, { headers: FETCH_HEADERS });
 
@@ -22,7 +23,9 @@ export function createTheSkintScraper(apiKey: string): EventSource {
       const html = await response.text();
       console.log(`The Skint HTML: ${html.length} chars`);
 
-      const events = await parseEventsFromHtml(html, "theskint", BASE_URL, apiKey);
+      // The whole page is one item: it is skipped only when the page text is
+      // unchanged since the last extraction.
+      const { events } = await parseNewItems([html], stripHtml, cache, BASE_URL, apiKey);
       console.log(`The Skint: parsed ${events.length} events`);
 
       return events;
