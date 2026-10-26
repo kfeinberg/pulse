@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { getFirestore, Timestamp } from "firebase-admin/firestore";
+import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { ScrapedEvent } from "../scrapers/base.js";
 
 const CACHE_COLLECTION = "geocodingCache";
@@ -7,8 +7,6 @@ const CACHE_VERSION = "nominatim-v1";
 const NYC_VIEWBOX = "-74.2591,40.9176,-73.7004,40.4774";
 const REQUEST_INTERVAL_MS = 1100;
 const RATE_LIMIT_COOLDOWN_MS = 5000;
-
-let lastRequestAt = 0;
 
 interface NominatimResult {
   osm_id: number;
@@ -220,12 +218,31 @@ export class RateLimitedError extends Error {
   }
 }
 
-async function search(query: string): Promise<NominatimResult[]> {
-  const waitMs = REQUEST_INTERVAL_MS - (Date.now() - lastRequestAt);
-  if (waitMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
-  }
-  lastRequestAt = Date.now();
+export interface GeocoderDeps {
+  db?: Firestore;
+  fetch?: typeof fetch;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function reserveNominatimRequest(db: Firestore, nowMs: number): Promise<number> {
+  const ref = db.collection("_pipelineRateLimits").doc("nominatim");
+  return db.runTransaction(async (tx) => {
+    const raw = (await tx.get(ref)).data()?.requestAtMs;
+    const previous = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+    const requestAtMs = Math.max(nowMs, previous + REQUEST_INTERVAL_MS);
+    tx.set(ref, { requestAtMs });
+    return requestAtMs;
+  });
+}
+
+async function search(query: string, db: Firestore, deps: GeocoderDeps): Promise<NominatimResult[]> {
+  // One shared reservation survives replica changes and covers *requests*,
+  // not just queue dispatches (one task can try several fallback queries).
+  const now = deps.now ?? Date.now;
+  const requestAt = await reserveNominatimRequest(db, now());
+  const waitMs = requestAt - now();
+  if (waitMs > 0) await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(waitMs);
 
   const params = new URLSearchParams({
     q: query,
@@ -237,19 +254,25 @@ async function search(query: string): Promise<NominatimResult[]> {
     bounded: "1",
     dedupe: "1",
   });
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: {
-      "User-Agent": "PulseNYC/1.0 (https://pulse-3ed92.web.app)",
-      "Accept-Language": "en-US,en",
-    },
-  });
-  if (!response.ok) {
-    if (response.status === 429) {
-      throw new RateLimitedError(response.status);
+  try {
+    const response = await (deps.fetch ?? fetch)(`https://nominatim.openstreetmap.org/search?${params}`, {
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        "User-Agent": "PulseNYC/1.0 (https://pulse-3ed92.web.app)",
+        "Accept-Language": "en-US,en",
+      },
+    });
+    if (!response.ok) {
+      if (response.status === 429) throw new RateLimitedError(response.status);
+      throw new Error(`Nominatim returned ${response.status}`);
     }
-    throw new Error(`Nominatim returned ${response.status}`);
+    return (await response.json()) as NominatimResult[];
+  } finally {
+    // A slow reservation can leave its nominal timestamp behind the actual
+    // dispatch. Keep the global stage lease through this post-response/body
+    // cooldown, covering fallback queries and handoff to a fresh instance.
+    await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(REQUEST_INTERVAL_MS);
   }
-  return (await response.json()) as NominatimResult[];
 }
 
 // Thrown when no query found the place and at least one lookup failed with an
@@ -268,7 +291,8 @@ function cacheId(event: ScrapedEvent): string {
 }
 
 export async function resolveEventLocation(
-  event: ScrapedEvent
+  event: ScrapedEvent,
+  deps: GeocoderDeps = {}
 ): Promise<ResolvedLocation | null> {
   if (!event.location.trim()) return null;
   if (isGenericNycLocation(event.location)) {
@@ -276,7 +300,7 @@ export async function resolveEventLocation(
     return null;
   }
 
-  const db = getFirestore();
+  const db = deps.db ?? getFirestore();
   const cacheRef = db.collection(CACHE_COLLECTION).doc(cacheId(event));
   const cached = await cacheRef.get();
   if (cached.exists) {
@@ -288,7 +312,7 @@ export async function resolveEventLocation(
   let lookupError: unknown = null;
   for (const query of buildQueries(event)) {
     try {
-      const results = await search(query);
+      const results = await search(query, db, deps);
       if (results.length === 0) continue;
 
       const ranked = results
@@ -328,7 +352,7 @@ export async function resolveEventLocation(
         // extends the block; give up on this event and pause so subsequent
         // events back off instead of each issuing a full query storm.
         console.warn("Nominatim rate limited; skipping remaining queries for this event");
-        await new Promise((resolve) => setTimeout(resolve, RATE_LIMIT_COOLDOWN_MS));
+        await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(RATE_LIMIT_COOLDOWN_MS);
         break;
       }
     }

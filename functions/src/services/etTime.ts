@@ -82,5 +82,14 @@ export function etTimestamp(
   // Re-check once so times on DST transition days use the post-transition offset.
   const refined = guessUtc - tzOffsetMs(result);
   if (refined !== result) result = refined;
+  const local = new Intl.DateTimeFormat("en-US", {
+    timeZone: TIME_ZONE, year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+  }).formatToParts(new Date(result));
+  const value = (type: string) => Number(local.find((part) => part.type === type)?.value);
+  if (value("year") !== year || value("month") !== month || value("day") !== day || value("hour") !== hour || value("minute") !== minute) {
+    // In particular, 02:xx in the spring DST gap must not silently become 01:xx.
+    throw new Error("Wall-clock time does not exist in America/New_York");
+  }
   return result;
 }

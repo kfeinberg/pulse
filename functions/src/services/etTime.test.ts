@@ -40,3 +40,13 @@ test("etDateParts and etWeekday report the ET calendar day", () => {
 test("addDays and formatUsDate roll over month boundaries", () => {
   assert.equal(formatUsDate(addDays({ year: 2026, month: 10, day: 31 }, 2)), "11/02/2026");
 });
+
+test("nonexistent spring DST times fail instead of moving an event one hour earlier", () => {
+  assert.throws(() => etTimestamp(2026, 3, 8, 2, 30), /does not exist/);
+  assert.throws(() => etTimestamp(2026, 2, 30, 10, 0), /does not exist/);
+});
+
+test("fall DST ambiguity keeps the earlier occurrence and midnight remains valid", () => {
+  assert.equal(new Date(etTimestamp(2026, 11, 1, 1, 30)).toISOString(), "2026-11-01T05:30:00.000Z");
+  assert.equal(new Date(etTimestamp(2026, 11, 2, 0, 0)).toISOString(), "2026-11-02T05:00:00.000Z");
+});

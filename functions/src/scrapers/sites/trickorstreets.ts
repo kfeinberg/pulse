@@ -1,5 +1,5 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { etTimestamp } from "../../services/etTime.js";
+import { addDays, etTimestamp } from "../../services/etTime.js";
 
 // NYC DOT's seasonal Trick-or-Streets page (car-free Halloween streets every
 // October) is server-rendered HTML with two rigid tables — Signature Events
@@ -166,7 +166,11 @@ export function parseDateAndTime(
     to24Hour(Number(time[4]), time[6]), Number(time[5] ?? 0)
   );
   if (endTimestamp <= startTimestamp) {
-    endTimestamp += 24 * 60 * 60 * 1000;
+    const nextDay = addDays({ year, month, day }, 1);
+    endTimestamp = etTimestamp(
+      nextDay.year, nextDay.month, nextDay.day,
+      to24Hour(Number(time[4]), time[6]), Number(time[5] ?? 0)
+    );
   }
   return { startTimestamp, endTimestamp };
 }

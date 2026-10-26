@@ -1,9 +1,24 @@
-import { getFirestore, Timestamp, type DocumentReference } from "firebase-admin/firestore";
+import { getFirestore, Timestamp, type DocumentReference, type Firestore } from "firebase-admin/firestore";
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
 import { type ResolvedLocation } from "./geocoder.js";
 import { isUsableEventUrl } from "./eventUrl.js";
+import { addDays, etDateParts, etTimestamp } from "./etTime.js";
 
+export function nycDayBounds(timestamp: number): { start: number; end: number } {
+  const date = etDateParts(timestamp);
+  const next = addDays(date, 1);
+  return { start: etTimestamp(date.year, date.month, date.day, 0, 0), end: etTimestamp(next.year, next.month, next.day, 0, 0) };
+}
+
+export function parseDuplicateResponse(text: string, candidateCount: number): number | null {
+  if (text === "none") return null;
+  if (/^\d+$/.test(text)) {
+    const index = Number(text);
+    if (Number.isSafeInteger(index) && index < candidateCount) return index;
+  }
+  throw new Error("Invalid duplicate-matching response");
+}
 
 const EVENTS_COLLECTION = "events";
 
@@ -90,7 +105,9 @@ async function findFuzzyDuplicate(
 ): Promise<string | null> {
   if (candidates.length === 0) return null;
 
-  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
+  // Keep a single provider call below the 300s write-task deadline. Retry
+  // at the queue boundary, not inside an SDK whose timeout outlives the task.
+  const client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 0 });
 
   const candidateList = candidates
     .map((c, i) => `${i}: "${c.title}" at "${c.location}" on ${c.startTime.toDate().toISOString()}`)
@@ -116,14 +133,8 @@ If one is the same event, respond with ONLY the number (e.g. "0"). If none match
 
   const text = message.content[0].type === "text" ? message.content[0].text.trim() : "";
 
-  if (text === "none") return null;
-
-  const index = parseInt(text, 10);
-  if (!isNaN(index) && index >= 0 && index < candidates.length) {
-    return candidates[index].id;
-  }
-
-  return null;
+  const index = parseDuplicateResponse(text, candidates.length);
+  return index === null ? null : candidates[index].id;
 }
 
 export type UpsertOutcome =
@@ -144,9 +155,10 @@ export async function upsertEvent(
   event: ScrapedEvent,
   geo: ResolvedLocation | null,
   apiKey: string,
-  addId: string
+  addId: string,
+  deps: { db?: Firestore; fuzzyDuplicate?: typeof findFuzzyDuplicate } = {}
 ): Promise<UpsertOutcome> {
-  const db = getFirestore();
+  const db = deps.db ?? getFirestore();
   const category = event.category ?? "happening";
   const startDate = new Date(event.startTimestamp);
   const endDate = new Date(event.endTimestamp);
@@ -190,23 +202,24 @@ export async function upsertEvent(
       .collection(EVENTS_COLLECTION)
       .where("title", "==", event.title)
       .where("location", "==", event.location)
-      .limit(1)
       .get();
-    if (!titleLocQuery.empty) {
-      const doc = titleLocQuery.docs[0];
-      return merge(doc.ref, doc.data(), "title+location");
-    }
+    // Recurring shows at the same venue are distinct events. Only merge a
+    // title/place match when its actual time interval overlaps this one.
+    const doc = titleLocQuery.docs.find((candidate) => {
+      const data = candidate.data();
+      const start = data.startTime?.toMillis?.();
+      const end = data.endTime?.toMillis?.();
+      return typeof start === "number" && typeof end === "number" && start < event.endTimestamp && end > event.startTimestamp;
+    });
+    if (doc) return merge(doc.ref, doc.data(), "title+location");
   }
 
   // Fuzzy dedup: find events on the same day and ask Claude
-  const dayStart = new Date(startDate);
-  dayStart.setHours(0, 0, 0, 0);
-  const dayEnd = new Date(startDate);
-  dayEnd.setHours(23, 59, 59, 999);
+  const day = nycDayBounds(event.startTimestamp);
   const sameDayQuery = await db
     .collection(EVENTS_COLLECTION)
-    .where("startTime", ">=", Timestamp.fromDate(dayStart))
-    .where("startTime", "<=", Timestamp.fromDate(dayEnd))
+    .where("startTime", ">=", Timestamp.fromMillis(day.start))
+    .where("startTime", "<", Timestamp.fromMillis(day.end))
     .get();
   if (!sameDayQuery.empty) {
     const candidates = sameDayQuery.docs.map((doc) => ({
@@ -215,7 +228,7 @@ export async function upsertEvent(
       location: doc.data().location || "",
       startTime: doc.data().startTime,
     }));
-    const matchId = await findFuzzyDuplicate(event, startDate, candidates, apiKey);
+    const matchId = await (deps.fuzzyDuplicate ?? findFuzzyDuplicate)(event, startDate, candidates, apiKey);
     if (matchId) {
       const matchRef = db.collection(EVENTS_COLLECTION).doc(matchId);
       const matchDoc = await matchRef.get();

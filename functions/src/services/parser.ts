@@ -1,7 +1,8 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { EVENT_CATEGORIES, ScrapedEvent } from "../scrapers/base.js";
 import { EXTRACTION_MODEL, EXTRACTION_PROMPT } from "./extractionPrompt.js";
-import type { ExtractionCache } from "./extractionCache.js";
+import type { ExtractionCache, NewItems } from "./extractionCache.js";
+import { addDays, etTimestamp, type DateParts } from "./etTime.js";
 import { resolveEventbriteUrl } from "./eventUrl.js";
 import { temporalExclusionReason } from "./temporalFilter.js";
 
@@ -80,7 +81,7 @@ function isVagueLocation(location: string): boolean {
   return VAGUE_LOCATION_PATTERNS.some((p) => p.test(location));
 }
 
-interface ExtractedEvent {
+export interface ExtractedEvent {
   title: string;
   description: string;
   date: string;
@@ -89,8 +90,84 @@ interface ExtractedEvent {
   location: string;
   category: string;
   url?: string;
-  temporalStatus?: string;
-  temporalEvidence?: string;
+  temporalStatus: "scheduled_event" | "limited_run" | "permanent_attraction";
+  temporalEvidence: string;
+}
+
+function parseDate(date: string): DateParts {
+  const match = date.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) throw new Error(`Invalid extraction date: ${date}`);
+  const parts = { year: Number(match[1]), month: Number(match[2]), day: Number(match[3]) };
+  const check = new Date(Date.UTC(parts.year, parts.month - 1, parts.day));
+  if (check.getUTCFullYear() !== parts.year || check.getUTCMonth() + 1 !== parts.month || check.getUTCDate() !== parts.day) {
+    throw new Error(`Invalid extraction date: ${date}`);
+  }
+  return parts;
+}
+
+function parseTime(time: string, fallback: string): { hour: number; minute: number } {
+  const match = (time || fallback).match(/^(\d{1,2}):(\d{2})$/);
+  if (!match) throw new Error(`Invalid extraction time: ${time}`);
+  const hour = Number(match[1]);
+  const minute = Number(match[2]);
+  if (hour > 24 || minute > 59 || (hour === 24 && minute !== 0)) {
+    throw new Error(`Invalid extraction time: ${time}`);
+  }
+  return { hour, minute };
+}
+
+// Convert each endpoint separately: an overnight event can cross a DST change.
+export function parseEventTimes(date: string, startTime: string, endTime: string): {
+  startTimestamp: number; endTimestamp: number;
+} {
+  const parts = parseDate(date);
+  const start = parseTime(startTime, "12:00");
+  const end = parseTime(endTime, "23:59");
+  const startDay = addDays(parts, start.hour === 24 ? 1 : 0);
+  const startWallMinutes = start.hour * 60 + start.minute;
+  let endWallMinutes = end.hour * 60 + end.minute;
+  // Choose the calendar day before converting the end instant: a same-date
+  // DST gap may be irrelevant when this clock actually belongs to tomorrow.
+  // Equal clocks retain the existing next-day convention, including 24:00.
+  while (endWallMinutes <= startWallMinutes) endWallMinutes += 24 * 60;
+  const endDay = addDays(parts, Math.floor(endWallMinutes / (24 * 60)));
+  const startTimestamp = etTimestamp(startDay.year, startDay.month, startDay.day, start.hour % 24, start.minute);
+  const endTimestamp = etTimestamp(endDay.year, endDay.month, endDay.day, end.hour % 24, end.minute);
+  return { startTimestamp, endTimestamp };
+}
+
+// Invalid model output is an extraction failure, not a successful empty page.
+// Validate decisions before the temporal filter so malformed candidates cannot
+// be silently excluded and then remembered as successfully extracted.
+export function parseExtractionResponse(text: string): ExtractedEvent[] {
+  const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
+  let value: unknown;
+  try {
+    value = JSON.parse(cleaned);
+  } catch {
+    throw new Error("Failed to parse extraction JSON");
+  }
+  if (!Array.isArray(value)) throw new Error("Extraction response was not an array");
+  const fields = ["title", "description", "date", "startTime", "endTime", "location", "category", "temporalStatus", "temporalEvidence"];
+  return value.map((candidate: unknown, index) => {
+    if (!candidate || typeof candidate !== "object") throw new Error(`Invalid extraction item ${index}`);
+    const record = candidate as Record<string, unknown>;
+    for (const field of fields) {
+      if (typeof record[field] !== "string") throw new Error(`Extraction item ${index}: ${field} must be a string`);
+    }
+    if (record.url !== undefined && typeof record.url !== "string") throw new Error(`Extraction item ${index}: url must be a string`);
+    const event = candidate as ExtractedEvent;
+    if (!event.title.trim() || !event.temporalEvidence.trim()) throw new Error(`Extraction item ${index}: missing title or temporal evidence`);
+    if (!["scheduled_event", "limited_run", "permanent_attraction"].includes(event.temporalStatus)) {
+      throw new Error(`Extraction item ${index}: invalid temporalStatus`);
+    }
+    if (!(EVENT_CATEGORIES as readonly string[]).includes(event.category)) throw new Error(`Extraction item ${index}: invalid category`);
+    if (event.temporalStatus !== "permanent_attraction") {
+      if (!event.location.trim()) throw new Error(`Extraction item ${index}: missing location`);
+      parseEventTimes(event.date, event.startTime, event.endTime);
+    }
+    return event;
+  });
 }
 
 async function resolveVagueLocations(
@@ -125,48 +202,43 @@ Example: ["Joe's Pizza, 7 Carmine St, New York, NY", "Joe's Pizza, 150 E 14th St
       const text = message.content[0].type === "text" ? message.content[0].text : "";
       const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
 
-      let locations: string[];
+      let locations: unknown;
       try {
         locations = JSON.parse(cleaned);
       } catch {
-        console.warn(`Failed to parse locations for "${event.title}":`, text);
-        specificEvents.push(event);
-        continue;
+        throw new Error(`Failed to parse locations for "${event.title}"`);
       }
-
-      if (!Array.isArray(locations) || locations.length === 0) {
+      if (!Array.isArray(locations) || locations.some((loc) => typeof loc !== "string" || !loc.trim())) {
+        throw new Error(`Invalid location response for "${event.title}"`);
+      }
+      if (locations.length === 0) {
         console.log(`No specific locations found for "${event.title}", skipping`);
         continue;
       }
 
       console.log(`Resolved "${event.title}" to ${locations.length} locations`);
       for (const loc of locations) {
-        specificEvents.push({ ...event, location: loc });
+        specificEvents.push({ ...event, location: loc as string });
       }
     } catch (err) {
-      console.warn(`Location resolution failed for "${event.title}":`, err);
-      specificEvents.push(event);
+      // A failed resolution must not stage the source item as a success.
+      throw new Error(`Location resolution failed for "${event.title}"`, { cause: err });
     }
   }
 
   return specificEvents;
 }
 
-// Returns null when Claude's output cannot be parsed (including output cut
-// off at max_tokens), so callers can tell a failed extraction from a page
-// with no events.
+// Failures are thrown so the source run cannot report a healthy empty result.
 async function extractEvents(
   content: string,
   sourceName: string,
   sourceUrl: string,
   apiKey: string
-): Promise<ScrapedEvent[] | null> {
+): Promise<ScrapedEvent[]> {
+  if (content.length > MAX_EXTRACTION_CONTENT_CHARS) throw new Error("Extraction content exceeds the input limit");
   const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
-
-  const truncatedContent = content.slice(0, 100_000);
-  console.log(
-    `Content: ${content.length} chars → sent: ${truncatedContent.length} chars`
-  );
+  console.log(`Content sent: ${content.length} chars`);
 
   let message;
   try {
@@ -176,7 +248,7 @@ async function extractEvents(
       messages: [
         {
           role: "user",
-          content: `${EXTRACTION_PROMPT}\n\nPage content:\n${truncatedContent}`,
+          content: `${EXTRACTION_PROMPT}\n\nPage content:\n${content}`,
         },
       ],
     });
@@ -191,22 +263,8 @@ async function extractEvents(
   console.log("Response start:", text.slice(0, 200));
   console.log("Response end:", text.slice(-200));
 
-  // Strip markdown fences if present
-  const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
-
-  let parsed: ExtractedEvent[];
-
-  try {
-    parsed = JSON.parse(cleaned);
-  } catch {
-    console.error("Failed to parse Claude response:", text);
-    return null;
-  }
-
-  if (!Array.isArray(parsed)) {
-    console.error("Claude response was not an array:", parsed);
-    return null;
-  }
+  if (message.stop_reason === "max_tokens") throw new Error("Extraction response exceeded the output limit");
+  const parsed = parseExtractionResponse(text);
 
   // The extractor must make an explicit temporal-vs-permanent decision for
   // every candidate. Fail closed when that decision or its source evidence is
@@ -226,43 +284,8 @@ async function extractEvents(
   const resolvedEvents = await resolveVagueLocations(temporalEvents, client);
 
   return Promise.all(resolvedEvents.map(async (e) => {
-    const dateStr = e.date || new Date().toISOString().split("T")[0];
-    // Normalize time strings: handle "24:00" -> "00:00", ensure HH:MM format
-    const normalizeTime = (t: string, fallback: string): string => {
-      if (!t) return fallback;
-      const cleaned = t.replace(/^24:/, "00:");
-      // Ensure it matches HH:MM
-      if (/^\d{1,2}:\d{2}$/.test(cleaned)) {
-        const [h, m] = cleaned.split(":");
-        return `${h.padStart(2, "0")}:${m}`;
-      }
-      return fallback;
-    };
-    const startTimeStr = normalizeTime(e.startTime, "12:00");
-    const endTimeStr = normalizeTime(e.endTime, "23:59");
-    // Determine if date is in EDT (Mar-Nov) or EST (Nov-Mar)
-    const testDate = new Date(`${dateStr}T12:00:00Z`);
-    const month = testDate.getUTCMonth(); // 0-indexed
-    const isDST = month >= 2 && month <= 10; // rough EDT: Mar–Oct
-    const tzOffset = isDST ? "-04:00" : "-05:00";
-    // Parse times as Eastern Time
-    let startTimestamp = new Date(`${dateStr}T${startTimeStr}:00${tzOffset}`).getTime();
-    let endTimestamp = new Date(`${dateStr}T${endTimeStr}:00${tzOffset}`).getTime();
-    // Guard against NaN timestamps
-    if (isNaN(startTimestamp)) {
-      console.warn(`Invalid start timestamp for "${e.title}": date=${dateStr} time=${e.startTime}, using noon`);
-      startTimestamp = new Date(`${dateStr}T12:00:00${tzOffset}`).getTime();
-    }
-    if (isNaN(endTimestamp)) {
-      console.warn(`Invalid end timestamp for "${e.title}": date=${dateStr} time=${e.endTime}, using 23:59`);
-      endTimestamp = new Date(`${dateStr}T23:59:00${tzOffset}`).getTime();
-    }
-    // If end time is before start time, the event crosses midnight — bump end to next day
-    if (endTimestamp <= startTimestamp) {
-      const nextDay = new Date(new Date(`${dateStr}T00:00:00Z`).getTime() + 24 * 60 * 60 * 1000).toISOString().split("T")[0];
-      endTimestamp = new Date(`${nextDay}T${endTimeStr}:00${tzOffset}`).getTime();
-    }
-    console.log(`Parsed event: "${e.title}" date=${dateStr} start=${startTimeStr} end=${endTimeStr} startTs=${startTimestamp} endTs=${endTimestamp} category=${e.category}`);
+    const { startTimestamp, endTimestamp } = parseEventTimes(e.date, e.startTime, e.endTime);
+    console.log(`Parsed event: "${e.title}" date=${e.date} start=${e.startTime} end=${e.endTime} startTs=${startTimestamp} endTs=${endTimestamp} category=${e.category}`);
 
     let candidateSourceUrl = sourceUrl;
     if (e.url) {
@@ -295,33 +318,52 @@ async function extractEvents(
 }
 
 const ITEM_SEPARATOR = "\n\n---\n\n";
+export const MAX_EXTRACTION_CONTENT_CHARS = 100_000;
 
-// Sends the items this source has not extracted before to Claude as one
-// request, and returns the items that were sent (for overlaying source data
-// onto the parsed events) along with the events. The items' cache keys are
-// staged only when Claude's output parses, so a failed extraction is retried
-// on the next run.
+type ExtractItems = (content: string, sourceName: string, sourceUrl: string, apiKey: string) => Promise<ScrapedEvent[]>;
+
+function batchItems<T>(fresh: NewItems<T>): NewItems<T>[] {
+  // Check all items first, before any model call or successful-key staging.
+  if (fresh.texts.some((text) => text.length > MAX_EXTRACTION_CONTENT_CHARS)) {
+    throw new Error("An extraction item exceeds the input limit");
+  }
+  const batches: NewItems<T>[] = [];
+  let start = 0;
+  let size = 0;
+  for (let i = 0; i < fresh.texts.length; i++) {
+    const added = fresh.texts[i].length + (i > start ? ITEM_SEPARATOR.length : 0);
+    if (size + added > MAX_EXTRACTION_CONTENT_CHARS) {
+      batches.push({ items: fresh.items.slice(start, i), texts: fresh.texts.slice(start, i), keys: fresh.keys.slice(start, i) });
+      start = i;
+      size = 0;
+    }
+    size += fresh.texts[i].length + (i > start ? ITEM_SEPARATOR.length : 0);
+  }
+  if (start < fresh.items.length) {
+    batches.push({ items: fresh.items.slice(start), texts: fresh.texts.slice(start), keys: fresh.keys.slice(start) });
+  }
+  return batches;
+}
+
+// Each batch contains whole source items, never a truncated tail. Keys are
+// staged only after all batches succeed; malformed output throws to the source
+// caller rather than poisoning the cache or being counted as a healthy zero.
 export async function parseNewItems<T>(
   items: T[],
   toText: (item: T) => string,
   cache: ExtractionCache,
   sourceUrl: string,
-  apiKey: string
+  apiKey: string,
+  options: { extract?: ExtractItems } = {}
 ): Promise<{ items: T[]; events: ScrapedEvent[] }> {
   const fresh = await cache.filterNew(items, toText);
-  if (fresh.items.length === 0) {
-    return { items: [], events: [] };
+  const batches = batchItems(fresh);
+  const events: ScrapedEvent[] = [];
+  for (const batch of batches) {
+    const text = batch.texts.join(ITEM_SEPARATOR);
+    console.log(`Sending ${batch.items.length} ${cache.sourceName} items to Claude (${text.length} chars)`);
+    events.push(...await (options.extract ?? extractEvents)(text, cache.sourceName, sourceUrl, apiKey));
   }
-
-  const text = fresh.texts.join(ITEM_SEPARATOR);
-  console.log(
-    `Sending ${fresh.items.length} ${cache.sourceName} items to Claude (${text.length} chars)`
-  );
-  const events = await extractEvents(text, cache.sourceName, sourceUrl, apiKey);
-  if (!events) {
-    return { items: fresh.items, events: [] };
-  }
-
   cache.stage(fresh.keys);
   return { items: fresh.items, events };
 }

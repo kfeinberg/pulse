@@ -87,6 +87,11 @@ export function isFarmersMarket(item: NycGovEventItem): boolean {
 
 export function forcedCategory(item: NycGovEventItem): EventCategory | undefined {
   if (isFarmersMarket(item)) return "farmers_market";
+  // A Halloween family block party is not a generic street fair merely
+  // because its SAPO permit type is "Single Block Festival".
+  if (/trick[- ]or[- ]streets|trick[- ]or[- ]treat/i.test(`${item.name} ${item.shortDesc ?? ""}`)) {
+    return "trick_or_treat";
+  }
   const type = (item.shortDesc ?? "").trim().toLowerCase();
   if (STREET_FAIR_TYPES.has(type) || STREET_FAIR_TITLE.test(item.name)) {
     return "street_fair";
@@ -339,6 +344,48 @@ export async function fetchNycGovItems(nowMs: number): Promise<NycGovEventItem[]
   return weekdayFiltered;
 }
 
+export function overlayNycGovEvents(
+  parsed: ScrapedEvent[],
+  sentItems: NycGovEventItem[],
+  nowMs: number
+): ScrapedEvent[] {
+  const results: ScrapedEvent[] = [];
+  for (const candidate of parsed) {
+    let parsedUrl: URL | null = null;
+    try { parsedUrl = new URL(candidate.sourceUrl); } catch { /* fall back to an exact, unique title */ }
+    const urlMatches = sentItems.filter((item) => {
+      if (candidate.sourceUrl === item.permalink) return true;
+      const expected = new URL(detailUrl(item));
+      return parsedUrl !== null && parsedUrl.origin === expected.origin && parsedUrl.pathname === expected.pathname &&
+        parsedUrl.searchParams.get("id") === String(item.id) &&
+        parsedUrl.searchParams.get("sequence") === String(item.sequence);
+    });
+    const matches = urlMatches.length > 0 ? urlMatches : sentItems.filter(
+      (item) => normalizeTitle(item.name) === normalizeTitle(candidate.title)
+    );
+    if (matches.length !== 1) {
+      throw new Error(`Unmatched or ambiguous NYC.gov extraction: "${candidate.title}"`);
+    }
+    const match = matches[0];
+    const startMs = Date.parse(match.startDate);
+    let endMs = match.endDate ? Date.parse(match.endDate) : NaN;
+    // Some SAPO items carry end == start instead of a real end time.
+    if (!Number.isFinite(endMs) || endMs <= startMs) {
+      const parts = etDateParts(startMs);
+      endMs = etTimestamp(parts.year, parts.month, parts.day, 23, 59);
+    }
+    const event = { ...candidate, startTimestamp: startMs, endTimestamp: endMs, sourceUrl: detailUrl(match), sourceName: "nycgov" };
+    const forced = forcedCategory(match);
+    // Keep the explicit family-Halloween classification when generic permit
+    // metadata only suggests street_fair; explicit farmers-market data wins.
+    if (forced && (event.category !== "trick_or_treat" || forced !== "street_fair")) event.category = forced;
+    const sourceLocation = normalizeSapoAddress(match);
+    if (/\bbetween\b/i.test(sourceLocation) || /^\d+(-\d+)?\s/.test(sourceLocation)) event.location = sourceLocation;
+    if (event.endTimestamp >= nowMs) results.push(event);
+  }
+  return results;
+}
+
 export function createNycGovScraper(apiKey: string): EventSource {
   return {
     name: "nycgov",
@@ -368,48 +415,7 @@ export function createNycGovScraper(apiKey: string): EventSource {
         );
         console.log(`NYC.gov ${day}: Claude extracted ${parsed.length} events`);
 
-        const used = new Set<NycGovEventItem>();
-        for (const event of parsed) {
-          const parsedTitle = normalizeTitle(event.title);
-          const match = sentItems.find((item) => {
-            if (used.has(item)) return false;
-            const sourceTitle = normalizeTitle(item.name);
-            return (
-              parsedTitle.includes(sourceTitle.slice(0, 25)) ||
-              sourceTitle.includes(parsedTitle.slice(0, 25))
-            );
-          });
-          if (!match) {
-            console.warn(`Discarding unmatched NYC.gov extraction: "${event.title}"`);
-            continue;
-          }
-          used.add(match);
-
-          const startMs = Date.parse(match.startDate);
-          let endMs = match.endDate ? Date.parse(match.endDate) : NaN;
-          // Some SAPO items carry end == start instead of a real end time.
-          if (!Number.isFinite(endMs) || endMs <= startMs) {
-            const parts = etDateParts(startMs);
-            endMs = etTimestamp(parts.year, parts.month, parts.day, 23, 59);
-          }
-          event.startTimestamp = startMs;
-          event.endTimestamp = endMs;
-          event.sourceUrl = detailUrl(match);
-          event.sourceName = "nycgov";
-
-          const forced = forcedCategory(match);
-          if (forced) event.category = forced;
-
-          // Restore the source location when it is a concrete street segment
-          // or street address; otherwise (park permit areas etc.) keep the
-          // location Claude normalized.
-          const sourceLocation = normalizeSapoAddress(match);
-          if (/\bbetween\b/i.test(sourceLocation) || /^\d+(-\d+)?\s/.test(sourceLocation)) {
-            event.location = sourceLocation;
-          }
-
-          if (event.endTimestamp >= nowMs) results.push(event);
-        }
+        results.push(...overlayNycGovEvents(parsed, sentItems, nowMs));
       }
 
       console.log(`NYC.gov: returning ${results.length} upcoming events`);

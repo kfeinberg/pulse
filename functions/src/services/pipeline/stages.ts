@@ -2,29 +2,34 @@ import type { ScrapedEvent } from "../../scrapers/base.js";
 import type { ResolvedLocation } from "../geocoder.js";
 import type { UpsertOutcome } from "../firestore.js";
 import { temporalExclusionReason } from "../temporalFilter.js";
-import {
-  checkpointId,
-  STAGE_INPUT,
-  type CheckpointDoc,
-  type PipelineStore,
-  type Stage,
-} from "./checkpoints.js";
+import { checkpointId, quarantineId, STAGE_INPUT, type CheckpointDoc, type PipelineStore, type Stage } from "./checkpoints.js";
 import { resolvedLocationViolations, scrapedEventViolations } from "./contracts.js";
+import { LeaseBusyError } from "./leases.js";
 
-// Each task carries only the id of its input checkpoint. replayId marks a
-// replay: its tasks get fresh task ids and redo work a normal redelivery
-// would skip.
+// A replay has fresh, immutable outputs, but every delivery of that replay
+// shares those outputs. replayId is an operation identity, not a skip switch.
 export interface StageTask {
   inputId: string;
   replayId?: string;
 }
 
+export function parseStageTask(value: unknown): StageTask {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("task must be an object");
+  const task = value as Record<string, unknown>;
+  if (typeof task.inputId !== "string" || !/^[a-f0-9]{40}$/.test(task.inputId)) throw new Error("inputId must be a checkpoint id");
+  if (task.replayId !== undefined && (typeof task.replayId !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(task.replayId))) {
+    throw new Error("replayId is invalid");
+  }
+  return { inputId: task.inputId, ...(task.replayId === undefined ? {} : { replayId: task.replayId as string }) };
+}
+
 export interface StageDeps {
   store: PipelineStore;
   enqueue(stage: Stage, task: StageTask): Promise<void>;
-  // Throws on a transient failure (the queue retries); null means "no exact place".
   geocode(event: ScrapedEvent): Promise<ResolvedLocation | null>;
   upsert(event: ScrapedEvent, geo: ResolvedLocation | null, addId: string): Promise<UpsertOutcome>;
+  // Production supplies a Firestore lease; fixtures may execute inline.
+  exclusive?<T>(key: string, work: () => Promise<T>): Promise<T>;
   now?: () => number;
 }
 
@@ -33,8 +38,10 @@ export type StageResult =
   | { status: "quarantined"; reason: string }
   | { status: "skipped"; reason: string };
 
-async function loadInput(stage: Stage, task: StageTask, deps: StageDeps): Promise<CheckpointDoc | null> {
-  return deps.store.get(STAGE_INPUT[stage], task.inputId);
+async function loadInput(stage: Stage, task: StageTask, deps: StageDeps): Promise<CheckpointDoc> {
+  const input = await deps.store.get(STAGE_INPUT[stage], task.inputId);
+  if (!input) throw new Error(`input ${task.inputId} not found`);
+  return input;
 }
 
 async function quarantine(stage: Stage, input: CheckpointDoc, reason: string, deps: StageDeps): Promise<StageResult> {
@@ -43,9 +50,9 @@ async function quarantine(stage: Stage, input: CheckpointDoc, reason: string, de
   return { status: "quarantined", reason };
 }
 
-function handoff(stage: Stage, input: CheckpointDoc, data: Record<string, unknown>, deps: StageDeps): CheckpointDoc {
+function handoff(stage: Stage, input: CheckpointDoc, task: StageTask, data: Record<string, unknown>, deps: StageDeps): CheckpointDoc {
   return {
-    id: checkpointId(stage, input.id),
+    id: checkpointId(stage, input.id, undefined, task.replayId),
     source: input.source,
     runId: input.runId,
     createdAtMs: (deps.now ?? Date.now)(),
@@ -53,98 +60,93 @@ function handoff(stage: Stage, input: CheckpointDoc, data: Record<string, unknow
   };
 }
 
-// Gate: schema contract plus the time-bounded check. Anything that fails is
-// quarantined with the reason; accepted items go on to geocoding.
+async function exclusive<T>(key: string, work: () => Promise<T>, deps: StageDeps): Promise<T> {
+  return deps.exclusive ? deps.exclusive(key, work) : work();
+}
+
 export async function runGate(task: StageTask, deps: StageDeps): Promise<StageResult> {
   const input = await loadInput("gate", task, deps);
-  if (!input) return { status: "skipped", reason: `input ${task.inputId} not found` };
-  if (input.held && !task.replayId) return { status: "skipped", reason: "held by circuit breaker" };
-
-  const event = input.data.event;
-  const violations = scrapedEventViolations(event);
-  const temporal = violations.length ? null : temporalExclusionReason(event as ScrapedEvent);
-  if (violations.length) return quarantine("gate", input, `contract: ${violations.join("; ")}`, deps);
-  if (temporal) return quarantine("gate", input, temporal, deps);
-
-  const output = handoff("gate", input, { event }, deps);
-  await deps.store.put("accepted", output);
-  await deps.enqueue("geocode", { inputId: output.id, replayId: task.replayId });
+  // Only releaseQuarantine clears a hold. A normal replay cannot bypass it.
+  if (input.held) return { status: "skipped", reason: "held by circuit breaker" };
+  const outputId = checkpointId("gate", input.id, undefined, task.replayId);
+  let output = await deps.store.get("accepted", outputId);
+  if (!output) {
+    const event = input.data.event;
+    const violations = scrapedEventViolations(event);
+    const temporal = violations.length ? null : temporalExclusionReason(event as ScrapedEvent);
+    if (violations.length) return quarantine("gate", input, `contract: ${violations.join("; ")}`, deps);
+    if (temporal) return quarantine("gate", input, temporal, deps);
+    output = handoff("gate", input, task, { event }, deps);
+    await deps.store.put("accepted", output);
+  }
+  // Always retry the handoff, including after put succeeded but enqueue failed.
+  await deps.enqueue("geocode", { inputId: output.id, ...(task.replayId ? { replayId: task.replayId } : {}) });
+  await deps.store.markReleased(quarantineId("gate", input.id));
   return { status: "done", outputId: output.id };
 }
 
-// Geocode: resolve an exact pin. A lookup that errors throws so the queue
-// retries it; "no exact place" is passed on as null, since the event may
-// still merge into an existing one.
 export async function runGeocode(task: StageTask, deps: StageDeps): Promise<StageResult> {
   const input = await loadInput("geocode", task, deps);
-  if (!input) return { status: "skipped", reason: `input ${task.inputId} not found` };
-
   const violations = scrapedEventViolations(input.data.event);
   if (violations.length) return quarantine("geocode", input, `contract: ${violations.join("; ")}`, deps);
-  const event = input.data.event as ScrapedEvent;
-
-  const geo = await deps.geocode(event);
-  const output = handoff("geocode", input, { event, geo }, deps);
-  await deps.store.put("pinned", output);
-  await deps.enqueue("write", { inputId: output.id, replayId: task.replayId });
-  return { status: "done", outputId: output.id, detail: geo ? "pinned" : "no exact location" };
+  return exclusive("pipeline-geocode", async () => {
+    const outputId = checkpointId("geocode", input.id, undefined, task.replayId);
+    let output = await deps.store.get("pinned", outputId);
+    if (!output) {
+      const event = input.data.event as ScrapedEvent;
+      const geo = await deps.geocode(event);
+      const badPin = resolvedLocationViolations(geo);
+      if (badPin.length) return quarantine("geocode", input, `contract: ${badPin.join("; ")}`, deps);
+      output = handoff("geocode", input, task, { event, geo }, deps);
+      await deps.store.put("pinned", output);
+    }
+    await deps.enqueue("write", { inputId: output.id, ...(task.replayId ? { replayId: task.replayId } : {}) });
+    await deps.store.markReleased(quarantineId("geocode", input.id));
+    return { status: "done", outputId: output.id, detail: output.data.geo ? "pinned" : "no exact location" };
+  }, deps);
 }
 
-// Write: dedup against existing events, then merge or insert. The outcome is
-// recorded so a redelivered task is a no-op; a replay always reruns.
 export async function runWrite(task: StageTask, deps: StageDeps): Promise<StageResult> {
   const input = await loadInput("write", task, deps);
-  if (!input) return { status: "skipped", reason: `input ${task.inputId} not found` };
-
   const violations = [
     ...scrapedEventViolations(input.data.event),
-    ...resolvedLocationViolations(input.data.geo ?? null),
+    ...resolvedLocationViolations(input.data.geo),
   ];
   if (violations.length) return quarantine("write", input, `contract: ${violations.join("; ")}`, deps);
-
-  const outputId = checkpointId("write", input.id);
-  if (!task.replayId && (await deps.store.get("written", outputId))) {
-    return { status: "skipped", reason: "already written" };
-  }
-
-  const outcome = await deps.upsert(
-    input.data.event as ScrapedEvent,
-    (input.data.geo ?? null) as ResolvedLocation | null,
-    outputId
-  );
-  await deps.store.put("written", {
-    id: outputId,
-    source: input.source,
-    runId: input.runId,
-    createdAtMs: (deps.now ?? Date.now)(),
-    data: { inputId: input.id, outcome },
-  });
-  return { status: "done", outputId, detail: outcome.kind };
+  return exclusive("pipeline-write", async () => {
+    const outputId = checkpointId("write", input.id, undefined, task.replayId);
+    if (await deps.store.get("written", outputId)) {
+      await deps.store.markReleased(quarantineId("write", input.id));
+      return { status: "skipped", reason: "already written" };
+    }
+    const outcome = await deps.upsert(input.data.event as ScrapedEvent, input.data.geo as ResolvedLocation | null, outputId);
+    await deps.store.put("written", {
+      id: outputId,
+      source: input.source,
+      runId: input.runId,
+      createdAtMs: (deps.now ?? Date.now)(),
+      data: { inputId: input.id, outcome },
+    });
+    await deps.store.markReleased(quarantineId("write", input.id));
+    return { status: "done", outputId, detail: outcome.kind };
+  }, deps);
 }
 
 export const STAGE_RUNNERS: Record<Stage, (task: StageTask, deps: StageDeps) => Promise<StageResult>> = {
-  gate: runGate,
-  geocode: runGeocode,
-  write: runWrite,
+  gate: runGate, geocode: runGeocode, write: runWrite,
 };
 
-// Dead-letter handling: a failure is rethrown (so the queue retries with
-// backoff) until the last attempt, which quarantines the input with the error
-// instead, so one bad item stops retrying without blocking anything else.
 export async function runWithDeadLetter(
-  stage: Stage,
-  task: StageTask,
-  attempt: number,
-  maxAttempts: number,
-  deps: StageDeps
+  stage: Stage, task: StageTask, attempt: number, maxAttempts: number, deps: StageDeps
 ): Promise<StageResult> {
   try {
     return await STAGE_RUNNERS[stage](task, deps);
   } catch (error) {
-    if (attempt + 1 < maxAttempts) throw error;
-    const input = await loadInput(stage, task, deps);
+    // Contention is not a bad item; never quarantine another worker's input.
+    if (error instanceof LeaseBusyError || attempt + 1 < maxAttempts) throw error;
+    const input = await deps.store.get(STAGE_INPUT[stage], task.inputId);
     const reason = `dead-letter after ${attempt + 1} attempts: ${String(error)}`;
-    if (!input) return { status: "skipped", reason };
-    return quarantine(stage, input, reason, deps);
+    await deps.store.quarantine({ stage, inputId: task.inputId, source: input?.source ?? "unknown", runId: input?.runId ?? "unknown", reason });
+    return { status: "quarantined", reason };
   }
 }

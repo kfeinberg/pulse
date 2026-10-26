@@ -50,12 +50,12 @@ export function extractApiToken(js: string): string | null {
   return match ? match[2] : null;
 }
 
-async function discoverApiToken(): Promise<string> {
+async function discoverApiToken(request: typeof fetch): Promise<string> {
   try {
-    const pageResponse = await fetch(BASE_URL, { headers: FETCH_HEADERS });
+    const pageResponse = await request(BASE_URL, { headers: FETCH_HEADERS });
     const bundleUrl = pageResponse.ok ? extractBundleUrl(await pageResponse.text()) : null;
     if (bundleUrl) {
-      const bundleResponse = await fetch(bundleUrl, { headers: FETCH_HEADERS });
+      const bundleResponse = await request(bundleUrl, { headers: FETCH_HEADERS });
       const token = bundleResponse.ok ? extractApiToken(await bundleResponse.text()) : null;
       if (token) return token;
     }
@@ -74,14 +74,14 @@ export function showsInWindow(shows: OmrShow[], nowMs: number, days: number): Om
   });
 }
 
-async function fetchUpcomingShows(nowMs: number): Promise<OmrShow[]> {
-  const token = await discoverApiToken();
+export async function fetchUpcomingShows(nowMs: number, request: typeof fetch = fetch): Promise<OmrShow[]> {
+  const token = await discoverApiToken(request);
   const windowEndMs = nowMs + WINDOW_DAYS * 24 * 60 * 60 * 1000;
   const shows: OmrShow[] = [];
 
   for (let page = 1; page <= MAX_PAGES; page++) {
     const url = `${ORIGIN}/api/shows.json?index=true&page=${page}&per=${PER_PAGE}&regioned=1`;
-    const response = await fetch(url, {
+    const response = await request(url, {
       headers: {
         ...FETCH_HEADERS,
         Accept: "application/json",
@@ -90,12 +90,12 @@ async function fetchUpcomingShows(nowMs: number): Promise<OmrShow[]> {
       },
     });
     if (!response.ok) {
-      console.error(`OhMyRockness API page ${page} failed: ${response.status}`);
-      break;
+      throw new Error(`OhMyRockness API page ${page} failed: ${response.status}`);
     }
-    const pageShows = (await response.json()) as OmrShow[];
-    if (!Array.isArray(pageShows) || pageShows.length === 0) break;
-    shows.push(...pageShows);
+    const pageShows = (await response.json()) as unknown;
+    if (!Array.isArray(pageShows)) throw new Error(`OhMyRockness API page ${page} was not an array`);
+    if (pageShows.length === 0) break;
+    shows.push(...pageShows as OmrShow[]);
 
     // Pages are date-ordered: stop once a page reaches past the window.
     const lastStartMs = Date.parse(pageShows[pageShows.length - 1].starts_at ?? "");

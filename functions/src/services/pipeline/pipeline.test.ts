@@ -5,6 +5,8 @@ import type { ResolvedLocation } from "../geocoder.js";
 import { ExtractionCache, type SeenItemStore } from "../extractionCache.js";
 import {
   checkpointId,
+  checkpointDeletionPlan,
+  COLLECTIONS,
   itemId,
   quarantineId,
   stableJson,
@@ -48,16 +50,20 @@ function memoryStore() {
   };
   const quarantined = new Map<string, StoredQuarantineEntry>();
   const history = new Map<string, number[]>();
+  const extracts = new Map<string, import("./checkpoints.js").ExtractCheckpoint>();
   const store: PipelineStore = {
+    async getExtractRun(runId, source) { return extracts.get(`${runId}/${source}`) ?? null; },
+    async saveExtractRun(runId, source, checkpoint) { const key = `${runId}/${source}`; if (!extracts.has(key)) extracts.set(key, checkpoint); return extracts.get(key)!; },
     async get(c, id) { return docs[c].get(id) ?? null; },
-    async put(c, doc) { docs[c].set(doc.id, { ...doc }); },
+    async put(c, doc) { if (!docs[c].has(doc.id)) docs[c].set(doc.id, { ...doc }); },
     async setHeld(id, held) { const d = docs.items.get(id); if (d) d.held = held; },
-    async list(c, since, until) { return [...docs[c].values()].filter((d) => d.createdAtMs >= since && d.createdAtMs <= until); },
+    async list(c, since, until, limit, source) { return [...docs[c].values()].filter((d) => d.createdAtMs >= since && d.createdAtMs <= until && (!source || d.source === source)).slice(0, limit); },
     async quarantine(entry) {
       const id = quarantineId(entry.stage, entry.inputId);
       quarantined.set(id, { ...entry, id, createdAtMs: Date.now(), released: false });
     },
-    async listQuarantine(stage, since) { return [...quarantined.values()].filter((q) => q.stage === stage && q.createdAtMs >= since); },
+    async getQuarantine(stage, inputId) { return quarantined.get(quarantineId(stage, inputId)) ?? null; },
+    async listQuarantine(stage, since, limit, filters = {}) { return [...quarantined.values()].filter((q) => q.stage === stage && !q.released && q.createdAtMs >= since && q.createdAtMs <= (filters.untilMs ?? Infinity) && (!filters.source || q.source === filters.source)).slice(0, limit); },
     async markReleased(id) { const q = quarantined.get(id); if (q) q.released = true; },
     async sourceHistory(source) { return history.get(source) ?? []; },
     async recordSourceCount(source, listed, keep) { history.set(source, [...(history.get(source) ?? []), listed].slice(-keep)); },
@@ -239,4 +245,198 @@ test("replay requests are validated", () => {
   assert.throws(() => parseReplayRequest({ stage: "geocode", since: "not a date" }), /not a valid date/);
   const parsed = parseReplayRequest({ stage: "geocode", source: "dice", since: "2026-10-17" });
   assert.equal(parsed.sinceMs, Date.parse("2026-10-17"));
+});
+
+// Crash windows and replay delivery tests: the queue is at-least-once, not
+// an in-memory FIFO, and successful provider work must survive enqueue errors.
+test("geocode retry resumes its durable output after a downstream enqueue failure", async () => {
+  let lookups = 0;
+  let enqueues = 0;
+  const h = harness({
+    geocode: async () => { lookups++; if (lookups > 1) throw new Error("provider now offline"); return PIN; },
+    enqueue: async () => { if (++enqueues === 1) throw new Error("queue unavailable"); },
+  });
+  const id = seedItem(h, event());
+  await runGate({ inputId: id }, { ...h.deps, enqueue: async () => {} });
+  const task = { inputId: [...h.docs.accepted.keys()][0] };
+  await assert.rejects(runGeocode(task, h.deps), /queue unavailable/);
+  assert.equal(h.docs.pinned.size, 1);
+  assert.equal((await runGeocode(task, h.deps)).status, "done");
+  assert.equal(lookups, 1);
+  assert.equal(enqueues, 2);
+});
+
+test("replay redeliveries are idempotent and cannot replace an earlier pin", async () => {
+  let lookups = 0;
+  const h = harness({ geocode: async () => ({ ...PIN, latitude: PIN.latitude + ++lookups / 100 }) });
+  const id = seedItem(h, event());
+  await runGate({ inputId: id }, h.deps);
+  const inputId = [...h.docs.accepted.keys()][0];
+  const original = await runGeocode({ inputId }, h.deps);
+  const firstPin = [...h.docs.pinned.values()][0].data.geo;
+  const task = { inputId, replayId: "replay-1" };
+  const replayed = await runGeocode(task, h.deps);
+  await runGeocode(task, h.deps);
+  assert.equal(lookups, 2);
+  assert.equal(h.docs.pinned.size, 2);
+  assert.notDeepEqual(original, replayed);
+  assert.deepEqual([...h.docs.pinned.values()][0].data.geo, firstPin);
+});
+
+test("write redelivery of the same replay does not repeat the upsert", async () => {
+  const h = harness();
+  const id = seedItem(h, event());
+  h.queued.push({ stage: "gate", task: { inputId: id } });
+  await drain(h);
+  const task = { inputId: [...h.docs.pinned.keys()][0], replayId: "replay-1" };
+  await runWrite(task, h.deps);
+  await runWrite(task, h.deps);
+  assert.equal(h.upserts.length, 2);
+});
+
+test("single-input replay honors source, dates, existence, and circuit holds", async () => {
+  const h = harness();
+  const inputId = seedItem(h, event());
+  for (const request of [
+    { stage: "gate" as const, inputId, source: "dice" },
+    { stage: "gate" as const, inputId, untilMs: 0 },
+    { stage: "gate" as const, inputId: "missing" },
+  ]) assert.equal((await replay(request, h.deps)).queued, 0);
+  await h.store.setHeld(inputId, true);
+  assert.equal((await replay({ stage: "gate", inputId }, h.deps)).queued, 0);
+  assert.equal(h.queued.length, 0);
+});
+
+test("replay rejects inverted windows and malformed selectors", () => {
+  assert.throws(() => parseReplayRequest({ stage: "gate", since: "2026-10-20", until: "2026-10-17" }));
+  assert.throws(() => parseReplayRequest({ stage: "gate", source: 42 }));
+  assert.throws(() => parseReplayRequest({ stage: "gate", inputId: "a/b" }));
+  assert.throws(() => parseReplayRequest({ stage: "gate", releaseQuarantine: "yes" }));
+});
+
+test("extraction checkpoints from another run cannot hold a previous healthy delivery", async () => {
+  const h = harness();
+  const cache = () => new ExtractionCache("dice", { store: noopCache });
+  const e = event({ sourceName: "dice" });
+  await checkpointExtracted("dice", [e], cache(), "healthy", h.deps, { breaker: false });
+  const healthyTask = h.queued.shift()!.task;
+  h.history.set("dice", [40, 42, 38]);
+  await checkpointExtracted("dice", [e], cache(), "broken", h.deps, { breaker: true });
+  assert.equal(h.docs.items.get(healthyTask.inputId)!.runId, "healthy");
+  assert.equal(h.docs.items.get(healthyTask.inputId)!.held, false);
+  assert.equal(h.docs.items.size, 2);
+});
+
+test("checkpoint contracts reject finite but unrepresentable dates and incomplete pins", () => {
+  assert.ok(scrapedEventViolations(event({ startTimestamp: 1e30, endTimestamp: 1e30 })).length > 0);
+  const { osmType: _osmType, ...incomplete } = PIN;
+  assert.ok(resolvedLocationViolations(incomplete).length > 0);
+});
+
+test("roundup source counts stay stable when the extraction cache skips every item", async () => {
+  const h = harness();
+  const saved = new Set<string>();
+  const store: SeenItemStore = { findExisting: async (keys) => new Set(keys.filter((key) => saved.has(key))), save: async (keys) => { keys.forEach((key) => saved.add(key)); } };
+  for (let i = 0; i < 4; i++) {
+    const cache = new ExtractionCache("fieldnotes", { store });
+    const fresh = await cache.filterNew(["roundup with 30 events"], (text) => text);
+    cache.stage(fresh.keys);
+    const events = fresh.items.length ? Array.from({ length: 30 }, (_, j) => event({ title: `Market ${j}` })) : [];
+    const summary = await checkpointExtracted("fieldnotes", events, cache, `run${i}`, h.deps, { breaker: true });
+    assert.equal(summary.listed, 1);
+    assert.equal(summary.health.tripped, false);
+  }
+  assert.deepEqual(h.history.get("fieldnotes"), [1, 1, 1, 1]);
+});
+
+test("quarantine release remains unreleased when worker validation fails again", async () => {
+  const h = harness();
+  const inputId = seedItem(h, { ...event(), title: "" });
+  await runGate({ inputId }, h.deps);
+  await replay({ stage: "gate", inputId, releaseQuarantine: true }, h.deps);
+  assert.equal([...h.quarantined.values()][0].released, false);
+  await drain(h);
+  assert.equal([...h.quarantined.values()][0].released, false);
+});
+
+test("replay size and date bounds reject before enqueueing any task", async () => {
+  const h = harness();
+  for (let i = 0; i < 1001; i++) seedItem(h, event({ title: `Event ${i}` }));
+  await assert.rejects(replay({ stage: "gate" }, h.deps), /too many/);
+  await assert.rejects(replay({ stage: "gate", sinceMs: 0, untilMs: 15 * 24 * 60 * 60 * 1000 }, h.deps), /at most 14/);
+  assert.equal(h.queued.length, 0);
+});
+
+test("missing input retries and eventually dead-letters instead of acknowledging data loss", async () => {
+  const h = harness();
+  await assert.rejects(runWithDeadLetter("gate", { inputId: "missing" }, 0, 3, h.deps), /not found/);
+  assert.equal((await runWithDeadLetter("gate", { inputId: "missing" }, 2, 3, h.deps)).status, "quarantined");
+  assert.equal(h.quarantined.size, 1);
+});
+
+test("14-day cleanup preserves upstream references of recent outputs and quarantine", () => {
+  const docs = [
+    { collection: COLLECTIONS.items, id: "old-item", createdAtMs: 1, runId: "run", data: {} },
+    { collection: COLLECTIONS.accepted, id: "old-accepted", createdAtMs: 2, runId: "run", data: { inputId: "old-item" } },
+    { collection: COLLECTIONS.pinned, id: "recent-pin", createdAtMs: 100, runId: "run", data: { inputId: "old-accepted" } },
+    { collection: COLLECTIONS.runs, id: "run", createdAtMs: 1, data: {} },
+    { collection: COLLECTIONS.items, id: "quarantined", createdAtMs: 1, data: {} },
+    { collection: COLLECTIONS.quarantine, id: "q", createdAtMs: 100, stage: "gate", inputId: "quarantined", data: {} },
+    { collection: COLLECTIONS.items, id: "obsolete", createdAtMs: 1, data: {} },
+  ];
+  assert.deepEqual(checkpointDeletionPlan(docs, 50), new Set([`${COLLECTIONS.items}/obsolete`]));
+});
+
+test("retaining an old extraction memo also retains its sibling items", () => {
+  const run = { collection: COLLECTIONS.runs, id: "run", createdAtMs: 1, data: { extractions: { source: { itemIds: ["a", "b"] } } } };
+  const docs = [
+    run,
+    { collection: COLLECTIONS.items, id: "a", createdAtMs: 1, runId: "run", data: {} },
+    { collection: COLLECTIONS.items, id: "b", createdAtMs: 1, runId: "run", data: {} },
+    { collection: COLLECTIONS.accepted, id: "accepted", createdAtMs: 100, runId: "run", data: { inputId: "a" } },
+  ];
+  assert.equal(checkpointDeletionPlan(docs, 50).size, 0);
+});
+
+test("one quarantine release is not blocked by 1001 unrelated source entries", async () => {
+  const h = harness();
+  for (let i = 0; i < 1001; i++) {
+    const inputId = seedItem(h, event({ title: `Unrelated ${i}` }), true);
+    await h.store.quarantine({ stage: "gate", inputId, source: "fieldnotes", runId: "run", reason: "held" });
+  }
+  const e = event({ sourceName: "dice" });
+  const inputId = itemId("dice", e);
+  h.docs.items.set(inputId, { id: inputId, source: "dice", runId: "run", createdAtMs: Date.now(), held: true, data: { event: e } });
+  await h.store.quarantine({ stage: "gate", inputId, source: "dice", runId: "run", reason: "held" });
+  assert.equal((await replay({ stage: "gate", source: "dice", inputId, releaseQuarantine: true }, h.deps)).queued, 1);
+  assert.equal(h.queued.length, 1);
+});
+
+test("extract retry resumes durable items after partial enqueue without calling the source again", async () => {
+  let sourceCalls = 0;
+  let queueCalls = 0;
+  const h = harness({ enqueue: async () => { if (++queueCalls === 1) throw new Error("queue unavailable"); } });
+  const source: EventSource = { name: "fieldnotes", scrape: async () => { sourceCalls++; return [event({ title: `Nondeterministic result ${sourceCalls}` })]; } };
+  await assert.rejects(runExtractStage(source, "run", h.deps), /queue unavailable/);
+  const ids = [...h.docs.items.keys()];
+  assert.equal((await runExtractStage(source, "run", h.deps)).queued, 1);
+  assert.equal(sourceCalls, 1);
+  assert.equal(queueCalls, 2);
+  assert.deepEqual([...h.docs.items.keys()], ids);
+});
+
+test("saved extraction cache keys commit on handoff retry without replacing source output", async () => {
+  const saved = new Set<string>();
+  const cacheStore: SeenItemStore = { findExisting: async () => new Set(), save: async (keys) => { keys.forEach((key) => saved.add(key)); } };
+  const first = new ExtractionCache("fieldnotes", { store: cacheStore });
+  const fresh = await first.filterNew(["source card"], (s) => s);
+  first.stage(fresh.keys);
+  const h = harness({ enqueue: async () => { throw new Error("queue unavailable"); } });
+  await assert.rejects(checkpointExtracted("fieldnotes", [event()], first, "run", h.deps, { breaker: false }));
+  assert.equal(saved.size, 0);
+  const retry = new ExtractionCache("fieldnotes", { store: cacheStore });
+  const result = await checkpointExtracted("fieldnotes", [], retry, "run", { ...h.deps, enqueue: async () => {} }, { breaker: false });
+  assert.equal(result.extracted, 1);
+  assert.deepEqual(saved, new Set(fresh.keys));
+  assert.equal(h.docs.items.size, 1);
 });

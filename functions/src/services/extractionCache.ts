@@ -11,7 +11,7 @@ import { EXTRACTION_MODEL, EXTRACTION_PROMPT } from "./extractionPrompt.js";
 // with the model and prompt. Any edit to the item, the prompt or the model
 // produces a new key, so the item is extracted again. Bump CACHE_VERSION to
 // force a full re-extraction after changing parser post-processing.
-const CACHE_VERSION = 1;
+const CACHE_VERSION = 2;
 const COLLECTION = "_extractionCache";
 const CACHE_TTL_DAYS = 14;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -155,6 +155,12 @@ export class ExtractionCache {
   // Marks keys whose extraction succeeded; they are saved by commit().
   stage(keys: string[]): void {
     for (const key of keys) this.staged.add(key);
+  }
+
+  // Durable extraction checkpoints can restore these keys after an enqueue
+  // crash, without paying for a second (potentially nondeterministic) pass.
+  get stagedKeys(): string[] {
+    return [...this.staged];
   }
 
   async commit(): Promise<number> {

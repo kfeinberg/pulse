@@ -15,6 +15,11 @@ function isFiniteNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value);
 }
 
+function isValidTimestamp(value: unknown): value is number {
+  // Firestore Timestamp supports years 0001–9999, less than Date's full range.
+  return isFiniteNumber(value) && value >= Date.parse("0001-01-01T00:00:00Z") && value <= Date.parse("9999-12-31T23:59:59.999Z");
+}
+
 export function scrapedEventViolations(value: unknown): string[] {
   if (!value || typeof value !== "object") return ["event is not an object"];
   const event = value as Record<string, unknown>;
@@ -26,8 +31,8 @@ export function scrapedEventViolations(value: unknown): string[] {
   if (!isNonEmptyString(event.sourceName)) violations.push("sourceName is missing");
   if (typeof event.sourceUrl !== "string") violations.push("sourceUrl is not a string");
 
-  if (!isFiniteNumber(event.startTimestamp)) violations.push("startTimestamp is not a number");
-  if (!isFiniteNumber(event.endTimestamp)) violations.push("endTimestamp is not a number");
+  if (!isValidTimestamp(event.startTimestamp)) violations.push("startTimestamp is not a valid date");
+  if (!isValidTimestamp(event.endTimestamp)) violations.push("endTimestamp is not a valid date");
   if (
     isFiniteNumber(event.startTimestamp) &&
     isFiniteNumber(event.endTimestamp) &&
@@ -64,7 +69,11 @@ export function resolvedLocationViolations(value: unknown): string[] {
   if (!isFiniteNumber(geo.latitude) || Math.abs(geo.latitude) > 90) violations.push("latitude is invalid");
   if (!isFiniteNumber(geo.longitude) || Math.abs(geo.longitude) > 180) violations.push("longitude is invalid");
   if (!isNonEmptyString(geo.formattedAddress)) violations.push("formattedAddress is missing");
-  if (!isNonEmptyString(geo.provider)) violations.push("provider is missing");
+  if (geo.provider !== "nominatim") violations.push("provider is invalid");
+  if (!(geo.placeName === null || isNonEmptyString(geo.placeName))) violations.push("placeName is invalid");
+  if (!isNonEmptyString(geo.query)) violations.push("query is missing");
+  if (!isFiniteNumber(geo.osmId) || !Number.isSafeInteger(geo.osmId) || geo.osmId <= 0) violations.push("osmId is invalid");
+  if (!["node", "way", "relation"].includes(geo.osmType as string)) violations.push("osmType is invalid");
   return violations;
 }
 

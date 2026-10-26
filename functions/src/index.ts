@@ -11,7 +11,7 @@ import { upsertEvent } from "./services/firestore.js";
 import { resolveEventLocation } from "./services/geocoder.js";
 import {
   deleteExpiredExtractionCache,
-  ExtractionCache,
+  itemKey,
 } from "./services/extractionCache.js";
 import {
   COLLECTIONS,
@@ -19,11 +19,13 @@ import {
   firestorePipelineStore,
   type Stage,
 } from "./services/pipeline/checkpoints.js";
-import { checkpointExtracted, runExtractStage, type SourceRunSummary } from "./services/pipeline/extract.js";
+import { runExtractStage, type SourceRunSummary } from "./services/pipeline/extract.js";
 import { cloudTasksEnqueuer, STAGE_QUEUES } from "./services/pipeline/queue.js";
 import { parseReplayRequest, replay } from "./services/pipeline/replay.js";
-import { runWithDeadLetter, type StageDeps, type StageTask } from "./services/pipeline/stages.js";
-import { createHash, timingSafeEqual } from "node:crypto";
+import { runWithDeadLetter, parseStageTask, type StageDeps, type StageTask } from "./services/pipeline/stages.js";
+import { withRunLease, withStageLease, LeaseBusyError } from "./services/pipeline/leases.js";
+import { authorizeAdminHeader, isAdminToken } from "./services/admin.js";
+import { timingSafeEqual } from "node:crypto";
 import { Expo, ExpoPushMessage } from "expo-server-sdk";
 
 initializeApp();
@@ -42,47 +44,15 @@ function hasValidPoshToken(provided: string | undefined): boolean {
   );
 }
 
-// Cloud Scheduler and the Posh relay are both at-least-once: the same run
-// occasionally arrives twice (seen as two full dailyScrape runs on one day,
-// and every Posh payload POSTed twice). Each run claims a lock document in a
-// transaction first; a duplicate that finds a completed or still-running
-// claim exits without scraping or calling Claude. A failed run releases its
-// claim so a genuine retry can proceed.
-const RUN_LOCKS_COLLECTION = "_runLocks";
-const RUN_LEASE_MS = 35 * 60 * 1000; // longer than the 1800s function timeout
-
-async function claimRun(lockId: string): Promise<boolean> {
-  const db = getFirestore();
-  const ref = db.collection(RUN_LOCKS_COLLECTION).doc(lockId);
-  return db.runTransaction(async (tx) => {
-    const data = (await tx.get(ref)).data();
-    if (data?.status === "completed") return false;
-    if (
-      data?.status === "running" &&
-      Date.now() - data.startedAt.toMillis() < RUN_LEASE_MS
-    ) {
-      return false;
-    }
-    tx.set(ref, { status: "running", startedAt: Timestamp.now() });
-    return true;
-  });
-}
-
-async function finishRun(lockId: string, status: "completed" | "failed"): Promise<void> {
-  await getFirestore()
-    .collection(RUN_LOCKS_COLLECTION)
-    .doc(lockId)
-    .update({ status, finishedAt: Timestamp.now() });
-}
-
-const ADMIN_EMAIL = "kalli.feinberg@gmail.com";
-
+// Scheduled/relay work uses token-fenced leases. Busy duplicate deliveries
+// retry instead of acknowledging a run whose first worker may still fail.
 function stageDeps(apiKey: string): StageDeps {
   return {
     store: firestorePipelineStore(),
     enqueue: cloudTasksEnqueuer(),
     geocode: resolveEventLocation,
     upsert: (event, geo, addId) => upsertEvent(event, geo, apiKey, addId),
+    exclusive: withStageLease,
   };
 }
 
@@ -107,6 +77,7 @@ async function runScraper(
   const deps = { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() };
   const results: string[] = [];
   const ledger: Record<string, unknown> = {};
+  const failures: unknown[] = [];
 
   for (const source of sources) {
     try {
@@ -118,6 +89,7 @@ async function runScraper(
     } catch (error) {
       const msg = `${source.name}: error — ${error}`;
       ledger[source.name] = { error: String(error) };
+      failures.push(error);
       console.error(msg);
       results.push(msg);
     }
@@ -125,7 +97,7 @@ async function runScraper(
 
   await getFirestore().collection(COLLECTIONS.runs).doc(runId).set(
     { createdAt: Timestamp.now(), sources: JSON.parse(JSON.stringify(ledger)) },
-    { merge: true }
+    { mergeFields: ["createdAt", "sources"] }
   );
   console.log(JSON.stringify({
     message: "Scrape run complete",
@@ -134,6 +106,7 @@ async function runScraper(
     timestamp: new Date().toISOString(),
   }));
 
+  if (failures.length) throw new AggregateError(failures, `${failures.length} source(s) failed; durable successful checkpoints are preserved`);
   return results;
 }
 
@@ -145,22 +118,16 @@ export const dailyScrape = onSchedule(
     timeoutSeconds: 1800,
     memory: "2GiB",
     secrets: [anthropicApiKey],
+    retryCount: 3,
+    minBackoffSeconds: 60,
+    maxBackoffSeconds: 300,
   },
-  async () => {
-    const etDate = new Date().toLocaleDateString("en-CA", { timeZone: "America/New_York" });
+  async (event) => {
+    // A delayed retry still belongs to its scheduled day, not today's date.
+    const etDate = new Date(event.scheduleTime).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
     const lockId = `dailyScrape-${etDate}`;
-    if (!(await claimRun(lockId))) {
-      console.log(`Skipping duplicate dailyScrape delivery for ${etDate}`);
-      return;
-    }
-    try {
-      const results = await runScraper(anthropicApiKey.value(), lockId);
-      await finishRun(lockId, "completed");
-      console.log("Daily scrape complete:", results);
-    } catch (error) {
-      await finishRun(lockId, "failed");
-      throw error;
-    }
+    const result = await withRunLease(lockId, () => runScraper(anthropicApiKey.value(), lockId));
+    console.log(result.duplicate ? `Skipping completed dailyScrape ${etDate}` : "Daily scrape complete");
   }
 );
 
@@ -170,6 +137,10 @@ export const dailyScrape = onSchedule(
 export const scrapeNow = onRequest(
   { secrets: [anthropicApiKey], timeoutSeconds: 1800, memory: "2GiB" },
   async (req, res) => {
+    if (!(await authorizeAdminHeader(req.header("authorization"), (token) => getAuth().verifyIdToken(token, true)))) {
+      res.status(403).json({ error: "Admin only" });
+      return;
+    }
     const debug: Record<string, unknown> = {};
     const apiKey = anthropicApiKey.value();
     debug.apiKeyPresent = !!apiKey;
@@ -203,54 +174,39 @@ export const ingestPoshEvents = onRequest(
       return;
     }
 
-    // Identical payloads carry no new events, so process each one once.
-    const payloadHash = createHash("sha256")
-      .update(JSON.stringify(req.body?.events ?? null))
-      .digest("hex");
+    // Fingerprint includes the extraction prompt/model/parser generation.
+    const payloadHash = itemKey("posh-payload", JSON.stringify(req.body?.events ?? null));
     const lockId = `posh-${payloadHash.slice(0, 32)}`;
-    if (!(await claimRun(lockId))) {
-      console.log(`Skipping duplicate Posh payload ${lockId}`);
-      res.json({ source: "posh", status: "duplicate" });
-      return;
-    }
-
     const auditRef = getFirestore().collection("_scraperAudits").doc("posh");
     const startedAt = Date.now();
     try {
-      const cache = new ExtractionCache("posh");
-      const events = await parsePoshPayload(req.body?.events, anthropicApiKey.value(), cache);
-      // Posh pushes its payload rather than being fetched, and the payload is
-      // validated already, so it skips the source circuit breaker.
-      const summary = await checkpointExtracted("posh", events, cache, lockId,
-        { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() }, { breaker: false });
-      const result = {
-        source: "posh",
-        // A payload of only already-extracted events is healthy, not empty.
-        status: events.length > 0 || cache.skipped > 0 ? "ok" : "empty",
-        count: events.length,
-        alreadyExtracted: cache.skipped,
-        queued: summary.queued,
-        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
-        samples: events.slice(0, 5).map((event) => ({
-          title: event.title,
-          location: event.location,
-          sourceUrl: event.sourceUrl,
-        })),
-        completedAt: Timestamp.now(),
-      };
-      await auditRef.set(result);
-      await finishRun(lockId, "completed");
-      res.json(result);
+      const leased = await withRunLease(lockId, async () => {
+        const summary = await runExtractStage({ name: "posh", scrape: (cache) => parsePoshPayload(req.body?.events, anthropicApiKey.value(), cache) }, lockId,
+          { store: firestorePipelineStore(), enqueue: cloudTasksEnqueuer() }, { breaker: false });
+        const result = {
+          source: "posh",
+          status: summary.extracted > 0 || summary.skippedByCache > 0 ? "ok" : "empty",
+          count: summary.extracted,
+          alreadyExtracted: summary.skippedByCache,
+          queued: summary.queued,
+          elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+          samples: summary.samples ?? [],
+          completedAt: Timestamp.now(),
+        };
+        await auditRef.set(result);
+        return result;
+      });
+      res.json(leased.duplicate ? { source: "posh", status: "duplicate" } : leased.result);
     } catch (error) {
+      if (error instanceof LeaseBusyError) {
+        res.status(503).json({ source: "posh", status: "busy", error: "Retry this delivery later" });
+        return;
+      }
       const result = {
-        source: "posh",
-        status: "error",
-        error: String(error),
-        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
-        completedAt: Timestamp.now(),
+        source: "posh", status: "error", error: String(error),
+        elapsedSeconds: Math.round((Date.now() - startedAt) / 1000), completedAt: Timestamp.now(),
       };
       await auditRef.set(result);
-      await finishRun(lockId, "failed");
       console.error("Posh ingestion failed:", error);
       res.status(500).json(result);
     }
@@ -264,6 +220,7 @@ function stageWorker(stage: Stage) {
   const queue = STAGE_QUEUES[stage];
   return onTaskDispatched<StageTask>(
     {
+      invoker: "private",
       retryConfig: queue.retryConfig,
       rateLimits: queue.rateLimits,
       timeoutSeconds: queue.timeoutSeconds,
@@ -271,8 +228,9 @@ function stageWorker(stage: Stage) {
     },
     async (request) => {
       const deps = stageDeps(stage === "write" ? anthropicApiKey.value() : "");
+      const task = parseStageTask(request.data);
       const result = await runWithDeadLetter(
-        stage, request.data, request.retryCount, queue.retryConfig.maxAttempts, deps
+        stage, task, request.retryCount, queue.retryConfig.maxAttempts, deps
       );
       console.log(`[${stage}] ${request.data.inputId}: ${JSON.stringify(result)}`);
     }
@@ -291,7 +249,7 @@ export const replayStage = onCall(
   { secrets: [anthropicApiKey], timeoutSeconds: 1800, memory: "2GiB" },
   async (request) => {
     const token = request.auth?.token;
-    if (!token || token.email !== ADMIN_EMAIL || token.email_verified !== true) {
+    if (!isAdminToken(token)) {
       throw new HttpsError("permission-denied", "Admin only");
     }
     const body = (request.data ?? {}) as Record<string, unknown>;
