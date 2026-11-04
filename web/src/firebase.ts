@@ -19,13 +19,14 @@ import {
 import {
   getAuth,
   GoogleAuthProvider,
+  OAuthProvider,
   signInWithPopup,
   signOut as firebaseSignOut,
   onAuthStateChanged,
   User,
 } from 'firebase/auth';
 import { getFunctions, httpsCallable } from 'firebase/functions';
-import { AppEvent, Comment, Report, ReportCategory, UserProfile, FlagReason } from './types';
+import { AppEvent, Comment, NewEventInput, Report, ReportCategory, UserProfile, FlagReason } from './types';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -48,6 +49,14 @@ export type { User };
 
 export async function signInWithGoogle(): Promise<User> {
   const result = await signInWithPopup(auth, googleProvider);
+  return result.user;
+}
+
+export async function signInWithApple(): Promise<User> {
+  const provider = new OAuthProvider('apple.com');
+  provider.addScope('email');
+  provider.addScope('name');
+  const result = await signInWithPopup(auth, provider);
   return result.user;
 }
 
@@ -102,12 +111,37 @@ export async function voteOnEvent(
 
 export async function markInterested(
   eventId: string,
-  wasInterested: boolean
+  wasInterested: boolean,
+  userId?: string
 ): Promise<void> {
   const ref = doc(db, 'events', eventId);
   await updateDoc(ref, {
     interested: increment(wasInterested ? -1 : 1),
   });
+
+  // Store per-user interest in Firestore for push notifications
+  if (userId) {
+    const interestRef = doc(db, 'eventInterests', `${userId}_${eventId}`);
+    if (wasInterested) {
+      await deleteDoc(interestRef);
+    } else {
+      await setDoc(interestRef, { userId, eventId, createdAt: Timestamp.now() });
+    }
+  }
+}
+
+export async function addEvent(input: NewEventInput): Promise<string> {
+  const docRef = await addDoc(collection(db, 'events'), {
+    title: input.title,
+    description: input.description,
+    category: input.category,
+    latitude: input.latitude,
+    longitude: input.longitude,
+    startTime: Timestamp.fromDate(input.startTime),
+    endTime: Timestamp.fromDate(input.endTime),
+    createdAt: Timestamp.now(),
+  });
+  return docRef.id;
 }
 
 // Reports
