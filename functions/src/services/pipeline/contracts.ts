@@ -1,5 +1,10 @@
 import { EVENT_CATEGORIES, type ScrapedEvent } from "../../scrapers/base.js";
-import type { ResolvedLocation } from "../geocoder.js";
+import {
+  isNycForFreeEventUrl,
+  isSpecificSourceAddress,
+  isWithinNycViewbox,
+  type ResolvedLocation,
+} from "../geocoder.js";
 
 // Schema checks run at every handoff between pipeline stages. A stage that
 // receives input violating its contract quarantines it with the violations
@@ -30,6 +35,9 @@ export function scrapedEventViolations(value: unknown): string[] {
   if (!isNonEmptyString(event.location)) violations.push("location is missing");
   if (!isNonEmptyString(event.sourceName)) violations.push("sourceName is missing");
   if (typeof event.sourceUrl !== "string") violations.push("sourceUrl is not a string");
+  if (event.sourceOccurrenceId !== undefined && !isNonEmptyString(event.sourceOccurrenceId)) {
+    violations.push("sourceOccurrenceId is invalid");
+  }
 
   if (!isValidTimestamp(event.startTimestamp)) violations.push("startTimestamp is not a valid date");
   if (!isValidTimestamp(event.endTimestamp)) violations.push("endTimestamp is not a valid date");
@@ -69,11 +77,21 @@ export function resolvedLocationViolations(value: unknown): string[] {
   if (!isFiniteNumber(geo.latitude) || Math.abs(geo.latitude) > 90) violations.push("latitude is invalid");
   if (!isFiniteNumber(geo.longitude) || Math.abs(geo.longitude) > 180) violations.push("longitude is invalid");
   if (!isNonEmptyString(geo.formattedAddress)) violations.push("formattedAddress is missing");
-  if (geo.provider !== "nominatim") violations.push("provider is invalid");
   if (!(geo.placeName === null || isNonEmptyString(geo.placeName))) violations.push("placeName is invalid");
   if (!isNonEmptyString(geo.query)) violations.push("query is missing");
-  if (!isFiniteNumber(geo.osmId) || !Number.isSafeInteger(geo.osmId) || geo.osmId <= 0) violations.push("osmId is invalid");
-  if (!["node", "way", "relation"].includes(geo.osmType as string)) violations.push("osmType is invalid");
+  if (geo.provider === "nycforfree") {
+    if (!isWithinNycViewbox(geo.latitude, geo.longitude)) violations.push("source coordinates are outside NYC");
+    if (!isSpecificSourceAddress(geo.formattedAddress)) violations.push("source address is not specific");
+    if (!isNycForFreeEventUrl(geo.query)) violations.push("source query is not a trusted event URL");
+    if (geo.osmId !== null) violations.push("source osmId must be null");
+    if (geo.osmType !== null) violations.push("source osmType must be null");
+  } else {
+    if (geo.provider !== "nominatim") violations.push("provider is invalid");
+    // Source pins have no OSM identity; normal provider pins must retain the
+    // original strict identity contract instead of sharing that exemption.
+    if (!isFiniteNumber(geo.osmId) || !Number.isSafeInteger(geo.osmId) || geo.osmId <= 0) violations.push("osmId is invalid");
+    if (!["node", "way", "relation"].includes(geo.osmType as string)) violations.push("osmType is invalid");
+  }
   return violations;
 }
 
