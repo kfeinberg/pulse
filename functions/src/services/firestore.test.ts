@@ -87,3 +87,67 @@ test("malformed fuzzy decisions retry instead of silently treating them as no ma
   assert.equal(parseDuplicateResponse("1", 2), 1);
   for (const text of ["", "1 maybe", "2", "-1", "NaN"]) assert.throws(() => parseDuplicateResponse(text, 2));
 });
+
+test("re-extracting the same source repairs a legacy day-one-only end without losing votes/category", async () => {
+  const { docs, db } = fakeFirestore();
+  const legacy = { ...event("2026-11-13"), title: "Holiday Train Show", sourceName: "nycforfree",
+    sourceUrl: "https://www.nycforfree.co/events/holiday-train-show", temporalStatus: "limited_run" as const };
+  await upsertEvent(legacy, PIN, "unused", "legacy", { db });
+  docs.get("legacy")!.category = "popup";
+  docs.get("legacy")!.thumbsUp = 7;
+  const corrected = { ...legacy, endTimestamp: Date.parse("2027-02-22T00:00:00Z"),
+    sourceOccurrenceId: "holiday-train-show|run|grand-central", temporalEvidence: "Runs through February 21" };
+  assert.equal((await upsertEvent(corrected, PIN, "unused", "corrected", { db })).kind, "merged");
+  assert.equal(docs.size, 1);
+  assert.equal((docs.get("legacy")!.endTime as Timestamp).toMillis(), corrected.endTimestamp);
+  assert.equal(docs.get("legacy")!.category, "popup");
+  assert.equal(docs.get("legacy")!.thumbsUp, 7);
+  assert.equal(docs.get("legacy")!.sourceOccurrenceId, corrected.sourceOccurrenceId);
+});
+
+test("stable source occurrence identity updates schedule and pin without duplicating the event", async () => {
+  const { docs, db } = fakeFirestore();
+  const e = { ...event("2026-11-13"), sourceOccurrenceId: "popup|run|venue" };
+  await upsertEvent(e, PIN, "unused", "a", { db });
+  const updated = { ...e, title: "Corrected source title", startTimestamp: e.startTimestamp + 3600_000,
+    endTimestamp: e.endTimestamp + 2 * 86400_000, location: "Source venue, full address" };
+  const changedPin = { ...PIN, latitude: 40.74, formattedAddress: updated.location };
+  const result = await upsertEvent(updated, changedPin, "unused", "b", { db });
+  assert.deepEqual(result, { kind: "merged", eventId: "a", match: "source-occurrence" });
+  assert.equal(docs.size, 1);
+  assert.equal((docs.get("a")!.startTime as Timestamp).toMillis(), updated.startTimestamp);
+  assert.equal((docs.get("a")!.endTime as Timestamp).toMillis(), updated.endTimestamp);
+  assert.equal(docs.get("a")!.latitude, changedPin.latitude);
+});
+
+test("different source occurrences do not merge even with the same title/place and overlapping clocks", async () => {
+  const { docs, db } = fakeFirestore();
+  const e = event("2026-11-13");
+  for (const [id, key] of [["a", "tour|stop-a"], ["b", "tour|stop-b"]]) {
+    const result = await upsertEvent({ ...e, sourceOccurrenceId: key }, PIN, "unused", id,
+      { db, fuzzyDuplicate: async (_event, _start, candidates) => candidates[0]?.id ?? null });
+    assert.equal(result.kind, "added");
+  }
+  assert.equal(docs.size, 2);
+});
+
+test("adding a different source URL cannot silently replace an existing event schedule", async () => {
+  const { docs, db } = fakeFirestore();
+  const e = event("2026-11-13");
+  await upsertEvent(e, PIN, "unused", "a", { db });
+  await upsertEvent({ ...e, sourceUrl: "https://other.example/event", endTimestamp: e.endTimestamp - 1800_000 },
+    PIN, "unused", "b", { db });
+  assert.equal((docs.get("a")!.endTime as Timestamp).toMillis(), e.endTimestamp);
+});
+
+test("non-overlapping sessions are excluded from fuzzy duplicate matching", async () => {
+  const { docs, db } = fakeFirestore();
+  const e = event("2026-11-13");
+  await upsertEvent(e, PIN, "unused", "a", { db });
+  await upsertEvent({ ...e, startTimestamp: e.startTimestamp + 7200_000, endTimestamp: e.endTimestamp + 7200_000 },
+    PIN, "unused", "b", { db, fuzzyDuplicate: async (_event, _start, candidates) => {
+      assert.equal(candidates.length, 0);
+      return null;
+    } });
+  assert.equal(docs.size, 2);
+});

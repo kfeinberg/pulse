@@ -26,15 +26,90 @@ interface NominatimResult {
   };
 }
 
-export interface ResolvedLocation {
+interface ResolvedLocationFields {
   latitude: number;
   longitude: number;
   formattedAddress: string;
   placeName: string | null;
   query: string;
-  provider: "nominatim";
-  osmId: number;
-  osmType: string;
+}
+
+export type ResolvedLocation = ResolvedLocationFields & (
+  | { provider: "nominatim"; osmId: number; osmType: string }
+  | { provider: "nycforfree"; osmId: null; osmType: null }
+);
+
+// This is the same bounded area used for Nominatim queries. Source coordinates
+// are authoritative only within it, not merely anywhere on the globe.
+export function isWithinNycViewbox(latitude: unknown, longitude: unknown): boolean {
+  return typeof latitude === "number" && Number.isFinite(latitude) &&
+    typeof longitude === "number" && Number.isFinite(longitude) &&
+    latitude >= 40.4774 && latitude <= 40.9176 &&
+    longitude >= -74.2591 && longitude <= -73.7004;
+}
+
+export function isNycForFreeEventUrl(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && !url.username && !url.password && !url.port &&
+      ["www.nycforfree.co", "nycforfree.co"].includes(url.hostname) &&
+      /^\/events\/[a-z0-9][a-z0-9_-]*\/?$/i.test(url.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function isSpecificSourceAddress(value: unknown): value is string {
+  if (typeof value !== "string" || value.trim().length < 3) return false;
+  if (/^(?:n\/?a|unknown|none|not specified|location|address)$/i.test(value.trim())) return false;
+  if (/\b(?:multiple|various|several|different)\s+(?:locations?|venues?|spots?|places?)\b|\b(?:locations?|venues?)\s+(?:across|throughout)\b|\b(?:tba|tbd|to be announced|to be determined|citywide|city-wide|online|virtual)\b|\b(?:see|check)\s+(?:website|site|link)\b/i.test(value)) return false;
+  // Comma-free "New York NY" and borough + ZIP strings are still generic.
+  const specific = normalize(value)
+    .replace(/\b\d{5}(?:\s\d{4})?\b/g, "")
+    .replace(/\b(?:new york city|new york|staten island|the bronx|manhattan|brooklyn|queens|bronx|nyc|ny|usa|united states)\b/g, "")
+    .trim();
+  return specific.length > 0;
+}
+
+function sourceAddressMatches(address: string, location: string): boolean {
+  const tidy = (value: string) => value.replace(/\s+/g, " ").trim().toLowerCase();
+  const requested = tidy(location);
+  const source = tidy(address);
+  const index = requested.indexOf(source);
+  if (index < 0) return false;
+  // Do not match "23 Broadway" inside "123 Broadway" or a partial name.
+  const before = requested[index - 1];
+  const after = requested[index + source.length];
+  return (!before || !/[a-z0-9]/.test(before)) && (!after || !/[a-z0-9]/.test(after));
+}
+
+function sourceLocation(event: ScrapedEvent): ResolvedLocation | null {
+  // Only scraper-attached provenance is trusted. Bare model-extracted
+  // latitude/longitude fields are deliberately never used as a fast path.
+  const pin = event.sourceLocation;
+  if (!pin || typeof pin !== "object" || event.sourceName !== "nycforfree" ||
+      !isNycForFreeEventUrl(event.sourceUrl) || pin.sourceUrl !== event.sourceUrl ||
+      !isSpecificSourceAddress(pin.address) || !isSpecificSourceAddress(event.location) ||
+      !sourceAddressMatches(pin.address, event.location) ||
+      !isWithinNycViewbox(pin.latitude, pin.longitude)) return null;
+  if (pin.placeName !== undefined && (typeof pin.placeName !== "string" || !pin.placeName.trim())) return null;
+  return {
+    latitude: pin.latitude,
+    longitude: pin.longitude,
+    formattedAddress: pin.address.trim(),
+    placeName: pin.placeName?.trim() ?? null,
+    query: pin.sourceUrl,
+    provider: "nycforfree",
+    osmId: null,
+    osmType: null,
+  };
+}
+
+function normalizeStreetDirections(location: string): string {
+  const directions: Record<string, string> = { N: "North", S: "South", E: "East", W: "West" };
+  return location.replace(/\b([NSEW])\s*(\d{1,3}(?:st|nd|rd|th))\b/gi,
+    (_match, direction: string, street: string) => `${directions[direction.toUpperCase()]} ${street}`);
 }
 
 function normalize(value: string): string {
@@ -107,6 +182,7 @@ export function segmentQueries(location: string): {
   streetOnlyQuery: string | null;
 } {
   const none = { junctionQueries: [] as string[], streetOnlyQuery: null };
+  location = normalizeStreetDirections(location);
   const boroughMatch = location.match(BOROUGH_PATTERN);
   const area = boroughMatch
     ? boroughMatch[1].replace(/^the\s+/i, "").replace(/\b\w/g, (c) => c.toUpperCase())
@@ -130,15 +206,22 @@ export function segmentQueries(location: string): {
   }
 
   const intersection = location.match(
-    /([A-Za-z0-9 .'-]+?)\s+(?:&|at)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
+    /([A-Za-z0-9 .'-]+?)\s+(&|at|and)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
   );
   if (intersection) {
     const a = intersection[1].trim();
-    const b = intersection[2].trim();
+    const separator = intersection[2].toLowerCase();
+    const b = intersection[3].trim();
     if (!a || !b || /^dead\s+end$/i.test(b)) return none;
+    // "Jazz and Friends" is a venue name, not a street intersection. Only
+    // add the new "and" lookup for two recognizable street names.
+    const streetName = /\b(?:street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln|place|pl|parkway|pkwy|way|broadway|bowery)\b|\b\d+(?:st|nd|rd|th)\b/i;
+    if (separator === "and" && (!streetName.test(a) || !streetName.test(b))) return none;
     return {
       junctionQueries: [`${a} & ${b}, ${suffix}`, `${b} & ${a}, ${suffix}`],
-      streetOnlyQuery: `${a}, ${suffix}`,
+      // New intersection support must not turn an unresolved junction into
+      // a potentially distant street centroid.
+      streetOnlyQuery: separator === "and" ? null : `${a}, ${suffix}`,
     };
   }
 
@@ -146,7 +229,7 @@ export function segmentQueries(location: string): {
 }
 
 function buildQueries(event: ScrapedEvent): string[] {
-  const location = event.location.replace(/\s+/g, " ").trim();
+  const location = normalizeStreetDirections(event.location).replace(/\s+/g, " ").trim();
   const { placeName, address } = parseLocation(location);
   const sourceHint = getSourceHint(event.sourceUrl);
   const { junctionQueries, streetOnlyQuery } = segmentQueries(location);
@@ -295,6 +378,10 @@ export async function resolveEventLocation(
   deps: GeocoderDeps = {}
 ): Promise<ResolvedLocation | null> {
   if (!event.location.trim()) return null;
+  // A validated, event-specific publisher pin outranks stale OSM cache data
+  // and needs neither a cache write nor a Nominatim request reservation.
+  const sourcePin = sourceLocation(event);
+  if (sourcePin) return sourcePin;
   if (isGenericNycLocation(event.location)) {
     console.warn(`Skipped generic NYC location without a specific place: "${event.location}"`);
     return null;

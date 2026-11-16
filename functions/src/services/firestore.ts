@@ -1,7 +1,8 @@
 import { getFirestore, Timestamp, type DocumentReference, type Firestore } from "firebase-admin/firestore";
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
-import { type ResolvedLocation } from "./geocoder.js";
+import { type ResolvedLocation, isNycForFreeEventUrl, isWithinNycViewbox } from "./geocoder.js";
+import { resolvedLocationViolations } from "./pipeline/contracts.js";
 import { isUsableEventUrl } from "./eventUrl.js";
 import { addDays, etDateParts, etTimestamp } from "./etTime.js";
 
@@ -21,6 +22,42 @@ export function parseDuplicateResponse(text: string, candidateCount: number): nu
 }
 
 const EVENTS_COLLECTION = "events";
+
+function hasSource(data: Record<string, unknown>, url: string): boolean {
+  return data.sourceUrl === url || (Array.isArray(data.sourceUrls) && data.sourceUrls.includes(url));
+}
+
+function sameTitle(event: ScrapedEvent, data: Record<string, unknown>): boolean {
+  const normalize = (value: string) => value.normalize("NFKC").toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  return typeof data.title === "string" && normalize(data.title) === normalize(event.title);
+}
+
+function conflictingOccurrence(event: ScrapedEvent, data: Record<string, unknown>): boolean {
+  if (!event.sourceOccurrenceId || !hasSource(data, event.sourceUrl)) return false;
+  if (typeof data.sourceOccurrenceId === "string") return data.sourceOccurrenceId !== event.sourceOccurrenceId;
+  // A legacy fuzzy merge may already have attached several distinct event URLs
+  // to one row. Sharing one of those URLs does not prove this is the same event.
+  return !sameTitle(event, data);
+}
+
+function sameStartDay(event: ScrapedEvent, data: Record<string, unknown>): boolean {
+  const start = (data.startTime as Timestamp | undefined)?.toMillis?.();
+  if (typeof start !== "number") return false;
+  const day = nycDayBounds(event.startTimestamp);
+  return start >= day.start && start < day.end;
+}
+
+function canMigrateLegacySingleRun(event: ScrapedEvent, geo: ResolvedLocation | null): boolean {
+  if (event.sourceName !== "nycforfree" || event.temporalStatus !== "limited_run" ||
+      !isNycForFreeEventUrl(event.sourceUrl) || !geo ||
+      !isWithinNycViewbox(geo.latitude, geo.longitude) || resolvedLocationViolations(geo).length > 0 ||
+      (geo.provider === "nycforfree" && geo.query !== event.sourceUrl) ||
+      !Number.isFinite(event.startTimestamp) || !Number.isFinite(event.endTimestamp) ||
+      !Number.isFinite(new Date(event.startTimestamp).getTime()) ||
+      !Number.isFinite(new Date(event.endTimestamp).getTime()) || event.endTimestamp <= event.startTimestamp) return false;
+  const slug = new URL(event.sourceUrl).pathname.split("/")[2];
+  return event.sourceOccurrenceId === `${slug}|run|single`;
+}
 
 function resolvedLocationFields(geo: ResolvedLocation): Record<string, unknown> {
   return {
@@ -139,7 +176,7 @@ If one is the same event, respond with ONLY the number (e.g. "0"). If none match
 
 export type UpsertOutcome =
   | { kind: "added"; eventId: string }
-  | { kind: "merged"; eventId: string; match: "title+time" | "title+location" | "fuzzy" }
+  | { kind: "merged"; eventId: string; match: "source-occurrence" | "title+time" | "title+location" | "fuzzy" }
   | { kind: "skipped"; reason: string };
 
 // Dedup-and-write for one event: the write stage of the pipeline. Exact
@@ -168,9 +205,25 @@ export async function upsertEvent(
   const merge = async (
     ref: DocumentReference,
     data: Record<string, unknown> | undefined,
-    match: "title+time" | "title+location" | "fuzzy"
+    match: "source-occurrence" | "title+time" | "title+location" | "fuzzy"
   ): Promise<UpsertOutcome> => {
     await updateResolvedLocation(ref, geo);
+    // A new extraction/replay of the same source occurrence can correct its
+    // duration. Keep curated categories/votes intact; never apply another
+    // source's schedule or turn a different recurring date into this record.
+    const sameIdentity = event.sourceOccurrenceId !== undefined &&
+      data?.sourceOccurrenceId === event.sourceOccurrenceId;
+    if (data && newUrl && hasSource(data, newUrl) && !conflictingOccurrence(event, data) &&
+      (sameIdentity || (sameTitle(event, data) && sameStartDay(event, data)))) {
+      await ref.update({
+        startTime: Timestamp.fromDate(startDate),
+        endTime: Timestamp.fromDate(endDate),
+        location: event.location,
+        temporalStatus: event.temporalStatus,
+        temporalEvidence: event.temporalEvidence,
+        ...(event.sourceOccurrenceId ? { sourceOccurrenceId: event.sourceOccurrenceId } : {}),
+      });
+    }
     if (data && newUrl && (await updateSourceUrl(ref, data, newUrl))) {
       console.log(`Updated source URL (${match}): "${event.title}"`);
     }
@@ -182,6 +235,35 @@ export async function upsertEvent(
     return { kind: "added", eventId: addId };
   }
 
+  // Source-backed identity stays stable when a run's final date or address
+  // formatting is corrected. It is scoped to the same source detail URL.
+  if (event.sourceOccurrenceId) {
+    const occurrences = await db.collection(EVENTS_COLLECTION)
+      .where("sourceOccurrenceId", "==", event.sourceOccurrenceId).get();
+    const occurrence = occurrences.docs.find((doc) => hasSource(doc.data(), event.sourceUrl));
+    if (occurrence) return merge(occurrence.ref, occurrence.data(), "source-occurrence");
+  }
+
+  // A single continuous source run may predate occurrence IDs and have a
+  // wrong pin/location label. Only its primary publisher URL, canonical title
+  // and NYC opening day establish this narrow legacy identity; a secondary
+  // URL from an earlier conflation does not. Read every candidate before writes.
+  if (canMigrateLegacySingleRun(event, geo)) {
+    const legacy = await db.collection(EVENTS_COLLECTION)
+      .where("sourceUrl", "==", event.sourceUrl).get();
+    const matches = legacy.docs.filter((doc) => {
+      const data = doc.data();
+      const start = data.startTime?.toMillis?.();
+      const end = data.endTime?.toMillis?.();
+      return data.sourceUrl === event.sourceUrl && data.temporalStatus === "limited_run" &&
+        !("sourceOccurrenceId" in data) && sameTitle(event, data) &&
+        typeof start === "number" && Number.isFinite(start) &&
+        typeof end === "number" && Number.isFinite(end) && end > start && sameStartDay(event, data);
+    });
+    if (matches.length > 1) throw new Error("Ambiguous legacy single-run source occurrence");
+    if (matches.length === 1) return merge(matches[0].ref, matches[0].data(), "source-occurrence");
+  }
+
   // Exact dedup: same title + start time, at the same named place. Multi-location
   // events often share a title and start time but need separate pins.
   const titleTimeQuery = await db
@@ -190,7 +272,8 @@ export async function upsertEvent(
     .where("startTime", "==", Timestamp.fromDate(startDate))
     .get();
   const titleTimeMatch = titleTimeQuery.docs.find(
-    (doc) => (doc.data().location || "").trim().toLowerCase() === event.location.trim().toLowerCase()
+    (doc) => !conflictingOccurrence(event, doc.data()) &&
+      (doc.data().location || "").trim().toLowerCase() === event.location.trim().toLowerCase()
   );
   if (titleTimeMatch) {
     return merge(titleTimeMatch.ref, titleTimeMatch.data(), "title+time");
@@ -209,7 +292,8 @@ export async function upsertEvent(
       const data = candidate.data();
       const start = data.startTime?.toMillis?.();
       const end = data.endTime?.toMillis?.();
-      return typeof start === "number" && typeof end === "number" && start < event.endTimestamp && end > event.startTimestamp;
+      return !conflictingOccurrence(event, data) && typeof start === "number" && typeof end === "number" &&
+        start < event.endTimestamp && end > event.startTimestamp;
     });
     if (doc) return merge(doc.ref, doc.data(), "title+location");
   }
@@ -222,7 +306,13 @@ export async function upsertEvent(
     .where("startTime", "<", Timestamp.fromMillis(day.end))
     .get();
   if (!sameDayQuery.empty) {
-    const candidates = sameDayQuery.docs.map((doc) => ({
+    const candidates = sameDayQuery.docs.filter((doc) => {
+      const data = doc.data();
+      const start = data.startTime?.toMillis?.();
+      const end = data.endTime?.toMillis?.();
+      return !conflictingOccurrence(event, data) && typeof start === "number" && typeof end === "number" &&
+        start < event.endTimestamp && end > event.startTimestamp;
+    }).map((doc) => ({
       id: doc.id,
       title: doc.data().title,
       location: doc.data().location || "",
@@ -253,6 +343,7 @@ export async function upsertEvent(
       endTime: Timestamp.fromDate(endDate),
       sourceUrl: newUrl,
       sourceUrls: newUrl ? [newUrl] : [],
+      ...(event.sourceOccurrenceId ? { sourceOccurrenceId: event.sourceOccurrenceId } : {}),
       createdAt: Timestamp.now(),
     });
   } catch (error) {

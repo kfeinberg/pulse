@@ -15,6 +15,14 @@ export const EVENT_CATEGORIES = [
 
 export type EventCategory = (typeof EVENT_CATEGORIES)[number];
 
+export interface SourceLocation {
+  latitude: number;
+  longitude: number;
+  address: string;
+  placeName?: string;
+  sourceUrl: string;
+}
+
 export interface ScrapedEvent {
   title: string;
   description: string;
@@ -26,6 +34,8 @@ export interface ScrapedEvent {
   sourceName: string;
   temporalStatus: "scheduled_event" | "limited_run";
   temporalEvidence: string;
+  sourceLocation?: SourceLocation;
+  sourceOccurrenceId?: string;
   latitude?: number;
   longitude?: number;
 }

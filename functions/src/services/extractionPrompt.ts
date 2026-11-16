@@ -7,7 +7,8 @@ export const EXTRACTION_PROMPT =
 For each event, extract:
 - title: the event name
 - description: a brief description (1-2 sentences). If none available, summarize from context.
-- date: the date in YYYY-MM-DD format
+- date: the first date of this event occurrence in YYYY-MM-DD format
+- endDate: its final date in YYYY-MM-DD format. Preserve an explicit final date for a continuous limited run. For a single-day occurrence use the same date; for an overnight event use its actual final date.
 - startTime: start time in HH:MM format (24h), or "" if unknown
 - endTime: end time in HH:MM format (24h), or "" if unknown
 - location: the exact venue/place name first, followed by its full street address and borough when available (for example, "e's Bar, 511 Amsterdam Ave, Manhattan"). Preserve the named place rather than substituting a nearby landmark or coordinates.
@@ -100,9 +101,9 @@ Never invent temporal evidence. If the only date comes from a roundup heading, p
 
 RECURRING / MULTI-DATE EVENTS:
 
-If an event listing spans a date range (e.g. "March 2 - March 30") but clearly represents recurring individual events (e.g. weekly movie nights, weekly yoga classes, a series of talks), break it into separate entries — one per occurrence. Use your best judgment to determine the recurrence pattern (weekly, daily, etc.) based on context clues. Each entry should have its own specific date. Keep the same title, location, and times for each occurrence.
+If an event listing spans a date range but represents individual occurrences (weekly movie nights, yoga classes, talks, or explicitly listed dates), emit one entry per occurrence with its own date and endDate. Use only a recurrence pattern or dates explicitly supported by the source. A listing's overall first/last dates do not mean it is open continuously between occurrences.
 
-If an event is truly a single continuous event spanning multiple days (e.g. a 3-day festival, a week-long exhibition), keep it as one entry with the start date.
+If an event is a genuine continuous limited run (a multi-day pop-up, festival, or temporary exhibition), keep one entry with date as the first day and endDate as the final day. Preserve its full run even when the first day is in the past; a still-running exhibition remains an event. Do not shorten a November-to-February run to its opening day. Use the source's final-day end time when provided.
 
 Only include events that have a clear date. Skip any event where the date and time cannot be determined.
 
@@ -120,10 +121,11 @@ RESPONSE FORMAT:
 
 Return ONLY a valid JSON array. No markdown fences, no backticks, no commentary, no explanation — just the raw JSON array starting with [ and ending with ].
 
-Every object in the array MUST have exactly these 10 fields:
+Every object in the array MUST have these fields:
 - "title" (string)
 - "description" (string)
-- "date" (string, YYYY-MM-DD)
+- "date" (string, YYYY-MM-DD; first date of this occurrence)
+- "endDate" (string, YYYY-MM-DD; final date of this occurrence or continuous run)
 - "startTime" (string, HH:MM 24h format)
 - "endTime" (string, HH:MM 24h format)
 - "location" (string)
@@ -140,6 +142,7 @@ Example of a correct response:
     "title": "Free Yoga in the Park",
     "description": "Outdoor yoga session open to all skill levels.",
     "date": "2025-07-15",
+    "endDate": "2025-07-15",
     "startTime": "10:00",
     "endTime": "11:00",
     "location": "Central Park Great Lawn",
@@ -152,6 +155,7 @@ Example of a correct response:
     "title": "Nike Pop-Up Shop",
     "description": "Limited-time sneaker experience with free giveaways.",
     "date": "2025-07-16",
+    "endDate": "2025-07-20",
     "startTime": "11:00",
     "endTime": "19:00",
     "location": "123 Broadway",

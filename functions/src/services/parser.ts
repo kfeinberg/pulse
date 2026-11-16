@@ -85,6 +85,7 @@ export interface ExtractedEvent {
   title: string;
   description: string;
   date: string;
+  endDate?: string;
   startTime: string;
   endTime: string;
   location: string;
@@ -117,18 +118,21 @@ function parseTime(time: string, fallback: string): { hour: number; minute: numb
 }
 
 // Convert each endpoint separately: an overnight event can cross a DST change.
-export function parseEventTimes(date: string, startTime: string, endTime: string): {
+export function parseEventTimes(date: string, startTime: string, endTime: string, endDate?: string): {
   startTimestamp: number; endTimestamp: number;
 } {
   const parts = parseDate(date);
+  const finalParts = endDate ? parseDate(endDate) : parts;
+  const days = (Date.UTC(finalParts.year, finalParts.month - 1, finalParts.day) -
+    Date.UTC(parts.year, parts.month - 1, parts.day)) / 86_400_000;
+  if (days < 0) throw new Error("Extraction end date is before start date");
   const start = parseTime(startTime, "12:00");
   const end = parseTime(endTime, "23:59");
   const startDay = addDays(parts, start.hour === 24 ? 1 : 0);
   const startWallMinutes = start.hour * 60 + start.minute;
-  let endWallMinutes = end.hour * 60 + end.minute;
-  // Choose the calendar day before converting the end instant: a same-date
-  // DST gap may be irrelevant when this clock actually belongs to tomorrow.
-  // Equal clocks retain the existing next-day convention, including 24:00.
+  let endWallMinutes = days * 24 * 60 + end.hour * 60 + end.minute;
+  // Preserve the final calendar date of a continuous run. The overnight
+  // convention applies only when its end clock would otherwise precede start.
   while (endWallMinutes <= startWallMinutes) endWallMinutes += 24 * 60;
   const endDay = addDays(parts, Math.floor(endWallMinutes / (24 * 60)));
   const startTimestamp = etTimestamp(startDay.year, startDay.month, startDay.day, start.hour % 24, start.minute);
@@ -156,6 +160,7 @@ export function parseExtractionResponse(text: string): ExtractedEvent[] {
       if (typeof record[field] !== "string") throw new Error(`Extraction item ${index}: ${field} must be a string`);
     }
     if (record.url !== undefined && typeof record.url !== "string") throw new Error(`Extraction item ${index}: url must be a string`);
+    if (record.endDate !== undefined && typeof record.endDate !== "string") throw new Error(`Extraction item ${index}: endDate must be a string`);
     const event = candidate as ExtractedEvent;
     if (!event.title.trim() || !event.temporalEvidence.trim()) throw new Error(`Extraction item ${index}: missing title or temporal evidence`);
     if (!["scheduled_event", "limited_run", "permanent_attraction"].includes(event.temporalStatus)) {
@@ -164,7 +169,10 @@ export function parseExtractionResponse(text: string): ExtractedEvent[] {
     if (!(EVENT_CATEGORIES as readonly string[]).includes(event.category)) throw new Error(`Extraction item ${index}: invalid category`);
     if (event.temporalStatus !== "permanent_attraction") {
       if (!event.location.trim()) throw new Error(`Extraction item ${index}: missing location`);
-      parseEventTimes(event.date, event.startTime, event.endTime);
+      if (event.temporalStatus === "limited_run" && !event.endDate?.trim()) {
+        throw new Error(`Extraction item ${index}: limited run is missing its final date`);
+      }
+      parseEventTimes(event.date, event.startTime, event.endTime, event.endDate);
     }
     return event;
   });
@@ -230,19 +238,22 @@ Example: ["Joe's Pizza, 7 Carmine St, New York, NY", "Joe's Pizza, 150 E 14th St
 }
 
 // Failures are thrown so the source run cannot report a healthy empty result.
-async function extractEvents(
+export async function extractEvents(
   content: string,
   sourceName: string,
   sourceUrl: string,
-  apiKey: string
+  apiKey: string,
+  options: { client?: Anthropic } = {}
 ): Promise<ScrapedEvent[]> {
   if (content.length > MAX_EXTRACTION_CONTENT_CHARS) throw new Error("Extraction content exceeds the input limit");
-  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
+  const client = options.client ?? new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
   console.log(`Content sent: ${content.length} chars`);
 
   let message;
   try {
-    message = await client.messages.create({
+    // Receive long JSON outputs incrementally so proxies do not close an idle
+    // connection. Validate only the fully aggregated message, never a fragment.
+    message = await client.messages.stream({
       model: EXTRACTION_MODEL,
       max_tokens: 32768,
       messages: [
@@ -251,7 +262,7 @@ async function extractEvents(
           content: `${EXTRACTION_PROMPT}\n\nPage content:\n${content}`,
         },
       ],
-    });
+    }).finalMessage();
   } catch (err) {
     console.error("Claude API call failed:", err);
     throw err;
@@ -264,6 +275,7 @@ async function extractEvents(
   console.log("Response end:", text.slice(-200));
 
   if (message.stop_reason === "max_tokens") throw new Error("Extraction response exceeded the output limit");
+  if (!message.stop_reason) throw new Error("Extraction stream ended before completion");
   const parsed = parseExtractionResponse(text);
 
   // The extractor must make an explicit temporal-vs-permanent decision for
@@ -281,10 +293,12 @@ async function extractEvents(
 
   // Resolve locations only after the temporal gate so permanent attractions do
   // not trigger extra model calls.
-  const resolvedEvents = await resolveVagueLocations(temporalEvents, client);
+  const resolvedEvents = sourceName === "nycforfree"
+    ? temporalEvents // The scraper overlays the source's actual addresses/pins; do not guess chain locations.
+    : await resolveVagueLocations(temporalEvents, client);
 
   return Promise.all(resolvedEvents.map(async (e) => {
-    const { startTimestamp, endTimestamp } = parseEventTimes(e.date, e.startTime, e.endTime);
+    const { startTimestamp, endTimestamp } = parseEventTimes(e.date, e.startTime, e.endTime, e.endDate);
     console.log(`Parsed event: "${e.title}" date=${e.date} start=${e.startTime} end=${e.endTime} startTs=${startTimestamp} endTs=${endTimestamp} category=${e.category}`);
 
     let candidateSourceUrl = sourceUrl;
