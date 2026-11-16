@@ -1,5 +1,6 @@
 import { ScrapedEvent } from "../base.js";
-import { parseEventsFromText } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems } from "../../services/parser.js";
 
 export const POSH_EXPLORE_URL =
   "https://posh.vip/explore?location=new_york_city";
@@ -78,12 +79,13 @@ export function validatePoshPayload(payload: unknown): PoshIngestEvent[] {
 
 export async function parsePoshPayload(
   payload: unknown,
-  apiKey: string
+  apiKey: string,
+  cache: ExtractionCache
 ): Promise<ScrapedEvent[]> {
   const events = validatePoshPayload(payload);
   if (events.length === 0) return [];
 
-  const eventTexts = events.map((event) => {
+  const eventToText = (event: PoshIngestEvent) => {
     const lineup = (event.lineup ?? [])
       .map((performer) => performer.name)
       .filter(isString)
@@ -102,13 +104,12 @@ export async function parsePoshPayload(
       `Location: ${eventLocation(event)}\n` +
       `URL: ${eventUrl}`
     );
-  });
+  };
 
-  const fullText = eventTexts.join("\n\n---\n\n");
-  console.log(`Sending ${events.length} Posh NYC events to Claude (${fullText.length} chars)`);
-  const parsedEvents = await parseEventsFromText(
-    fullText,
-    "posh",
+  const { items: sentEvents, events: parsedEvents } = await parseNewItems(
+    events,
+    eventToText,
+    cache,
     POSH_EXPLORE_URL,
     apiKey
   );
@@ -116,7 +117,7 @@ export async function parsePoshPayload(
   const matchedEvents: ScrapedEvent[] = [];
   for (const parsed of parsedEvents) {
     const normalizedTitle = parsed.title.toLowerCase();
-    const match = events.find((event) => {
+    const match = sentEvents.find((event) => {
       const sourceTitle = event.title.toLowerCase();
       return (
         normalizedTitle.includes(sourceTitle.slice(0, 20)) ||

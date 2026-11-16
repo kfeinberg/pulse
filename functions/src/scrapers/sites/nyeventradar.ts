@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems } from "../../services/parser.js";
 import { resolveEventbriteUrl } from "../../services/eventUrl.js";
 
 const BASE_URL = "https://ny-event-radar.com/";
@@ -33,7 +34,7 @@ function getDateString(daysFromNow: number): string {
 export function createNYEventRadarScraper(apiKey: string): EventSource {
   return {
     name: "nyeventradar",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       const today = getDateString(0);
       const threeDaysOut = getDateString(3);
 
@@ -79,7 +80,7 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
       }
 
       // Format for Claude to categorize
-      const eventTexts = events.map((event) => {
+      const eventToText = (event: NerEvent) => {
         const locationParts: string[] = [];
         if (event.location) locationParts.push(event.location);
         if (event.address) locationParts.push(event.address);
@@ -102,14 +103,12 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
           `Price: ${event.price || "N/A"}\n` +
           `URL: ${event.url || ""}`
         );
-      });
+      };
 
-      const fullText = eventTexts.join("\n\n---\n\n");
-      console.log(`Sending ${eventTexts.length} events to Claude (${fullText.length} chars)`);
-
-      const parsedEvents = await parseEventsFromText(
-        fullText,
-        "nyeventradar",
+      const { items: sentEvents, events: parsedEvents } = await parseNewItems(
+        events,
+        eventToText,
+        cache,
         BASE_URL,
         apiKey
       );
@@ -117,7 +116,7 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
 
       // Map individual event URLs back
       for (const parsed of parsedEvents) {
-        const match = events.find(
+        const match = sentEvents.find(
           (e) =>
             e.title &&
             parsed.title

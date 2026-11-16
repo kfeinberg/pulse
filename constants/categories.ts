@@ -50,9 +50,27 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
     color: '#EF6C00',
     backgroundColor: '#FFF3E0',
   },
+  farmers_market: {
+    label: 'Farmers Markets',
+    emoji: '🥕',
+    color: '#558B2F',
+    backgroundColor: '#F1F8E9',
+  },
+  street_fair: {
+    label: 'Street Fairs',
+    emoji: '🎡',
+    color: '#00838F',
+    backgroundColor: '#E0F7FA',
+  },
+  trick_or_treat: {
+    label: 'Trick-or-Treat',
+    emoji: '🎃',
+    color: '#D84315',
+    backgroundColor: '#FBE9E7',
+  },
 };
 
-export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'professional', 'bars', 'clubs', 'concerts'];
+export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'professional', 'bars', 'clubs', 'concerts', 'farmers_market', 'street_fair', 'trick_or_treat'];
 
 export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 

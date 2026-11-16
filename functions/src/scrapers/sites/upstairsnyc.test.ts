@@ -5,7 +5,9 @@ import {
   eventToText,
   extractDetailUrls,
   extractEventJsonLd,
+  extractFeedPublishDates,
   extractPostTitle,
+  filterStalePosts,
 } from "./upstairsnyc.js";
 
 test("extractDetailUrls normalizes and deduplicates canonical detail pages", () => {
@@ -80,5 +82,48 @@ test("extractPostTitle prefers BlogPosting metadata and falls back to og:title",
   assert.equal(
     extractPostTitle('<meta property="og:title" content="Weekly Picks &amp; More">'),
     "Weekly Picks & More"
+  );
+});
+
+test("extractFeedPublishDates maps post links to publish times", () => {
+  const xml = `
+    <rss><channel>
+      <item><title><![CDATA[Sep 1: Pop-Up]]></title>
+        <link>https://www.upstairsnyc.org/post/sep-1-pop-up</link>
+        <pubDate>Wed, 02 Sep 2026 17:16:17 GMT</pubDate></item>
+      <item><title><![CDATA[No date]]></title>
+        <link>https://www.upstairsnyc.org/post/no-date</link></item>
+    </channel></rss>`;
+  const dates = extractFeedPublishDates(xml);
+  assert.equal(dates.size, 1);
+  assert.equal(
+    dates.get("https://www.upstairsnyc.org/post/sep-1-pop-up"),
+    Date.parse("2026-09-02T17:16:17Z")
+  );
+});
+
+test("filterStalePosts drops old posts but keeps event pages and unknown posts", () => {
+  const now = Date.parse("2026-10-16T12:00:00Z");
+  const dates = new Map([
+    ["https://www.upstairsnyc.org/post/june-gala", Date.parse("2026-06-19T04:00:00Z")],
+    ["https://www.upstairsnyc.org/post/sep-pop-up", Date.parse("2026-09-02T17:16:17Z")],
+  ]);
+  assert.deepEqual(
+    filterStalePosts(
+      [
+        "https://www.upstairsnyc.org/events-1/sakecon-fall2026",
+        "https://www.upstairsnyc.org/post/june-gala",
+        "https://www.upstairsnyc.org/post/sep-pop-up",
+        "https://www.upstairsnyc.org/post/not-in-feed",
+      ],
+      dates,
+      now,
+      90
+    ),
+    [
+      "https://www.upstairsnyc.org/events-1/sakecon-fall2026",
+      "https://www.upstairsnyc.org/post/sep-pop-up",
+      "https://www.upstairsnyc.org/post/not-in-feed",
+    ]
   );
 });

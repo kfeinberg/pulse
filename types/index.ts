@@ -1,6 +1,6 @@
 import { Timestamp } from 'firebase/firestore';
 
-export type EventCategory = 'popup' | 'free_stuff' | 'happening' | 'professional' | 'bars' | 'clubs' | 'concerts';
+export type EventCategory = 'popup' | 'free_stuff' | 'happening' | 'professional' | 'bars' | 'clubs' | 'concerts' | 'farmers_market' | 'street_fair' | 'trick_or_treat';
 
 export interface AppEvent {
   id: string;

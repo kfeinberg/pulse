@@ -103,7 +103,8 @@ export function resolveEventbriteUrlFromHtml(
  */
 export async function resolveEventbriteUrl(
   title: string,
-  candidateUrl: string
+  candidateUrl: string,
+  options: { fetch?: typeof fetch } = {}
 ): Promise<string | null> {
   if (!candidateUrl || !isEventbriteUrl(candidateUrl)) return candidateUrl || null;
 
@@ -116,7 +117,8 @@ export async function resolveEventbriteUrl(
   try {
     const searchUrl = new URL("https://www.eventbrite.com/d/ny--new-york/events/");
     searchUrl.searchParams.set("q", title);
-    const response = await fetch(searchUrl, {
+    const response = await (options.fetch ?? fetch)(searchUrl, {
+      signal: AbortSignal.timeout(15_000),
       headers: {
         "User-Agent":
           "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -138,7 +140,8 @@ export async function resolveEventbriteUrl(
     return resolved;
   } catch (error) {
     console.warn(`Eventbrite URL resolution failed for "${title}":`, error);
-    URL_CACHE.set(cacheKey, null);
-    return null;
+    // Only a successfully retrieved page can establish a negative result.
+    // Throw so parseNewItems cannot cache this transient failure for 14 days.
+    throw new Error(`Eventbrite URL resolution failed for "${title}"`, { cause: error });
   }
 }

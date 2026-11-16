@@ -1,13 +1,12 @@
 import { createHash } from "node:crypto";
-import { getFirestore, Timestamp } from "firebase-admin/firestore";
+import { getFirestore, Timestamp, type Firestore } from "firebase-admin/firestore";
 import { ScrapedEvent } from "../scrapers/base.js";
 
 const CACHE_COLLECTION = "geocodingCache";
 const CACHE_VERSION = "nominatim-v1";
 const NYC_VIEWBOX = "-74.2591,40.9176,-73.7004,40.4774";
 const REQUEST_INTERVAL_MS = 1100;
-
-let lastRequestAt = 0;
+const RATE_LIMIT_COOLDOWN_MS = 5000;
 
 interface NominatimResult {
   osm_id: number;
@@ -96,16 +95,69 @@ function parseLocation(location: string): {
   return { placeName, address, addressOnly, houseNumber };
 }
 
+const BOROUGH_PATTERN = /\b(Manhattan|Brooklyn|Queens|The Bronx|Bronx|Staten Island)\b/i;
+
+// Street-segment and intersection locations (street fairs, farmers markets,
+// Trick-or-Streets) have no house number for Nominatim to anchor on, and the
+// raw phrasing ("X between A and B") returns nothing. Junction phrasing
+// ("A & X") hits OSM junction nodes when they exist; the bare street name
+// resolves to the street itself as a last-resort centroid.
+export function segmentQueries(location: string): {
+  junctionQueries: string[];
+  streetOnlyQuery: string | null;
+} {
+  const none = { junctionQueries: [] as string[], streetOnlyQuery: null };
+  const boroughMatch = location.match(BOROUGH_PATTERN);
+  const area = boroughMatch
+    ? boroughMatch[1].replace(/^the\s+/i, "").replace(/\b\w/g, (c) => c.toUpperCase())
+    : "New York";
+  const suffix = `${area}, New York, NY`;
+
+  const segment = location.match(
+    /([A-Za-z0-9 .'-]+?)\s+(?:between|from)\s+([A-Za-z0-9 .'-]+?)\s+(?:and|to)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
+  );
+  if (segment) {
+    const street = segment[1].trim();
+    const crosses = [segment[2].trim(), segment[3].trim()].filter(
+      (cross) => cross && !/^dead\s+end$/i.test(cross)
+    );
+    if (!street) return none;
+    const junctionQueries = crosses.flatMap((cross) => [
+      `${cross} & ${street}, ${suffix}`,
+      `${street} & ${cross}, ${suffix}`,
+    ]);
+    return { junctionQueries, streetOnlyQuery: `${street}, ${suffix}` };
+  }
+
+  const intersection = location.match(
+    /([A-Za-z0-9 .'-]+?)\s+(?:&|at)\s+([A-Za-z0-9 .'-]+?)(?:,| in | on |$)/i
+  );
+  if (intersection) {
+    const a = intersection[1].trim();
+    const b = intersection[2].trim();
+    if (!a || !b || /^dead\s+end$/i.test(b)) return none;
+    return {
+      junctionQueries: [`${a} & ${b}, ${suffix}`, `${b} & ${a}, ${suffix}`],
+      streetOnlyQuery: `${a}, ${suffix}`,
+    };
+  }
+
+  return none;
+}
+
 function buildQueries(event: ScrapedEvent): string[] {
   const location = event.location.replace(/\s+/g, " ").trim();
   const { placeName, address } = parseLocation(location);
   const sourceHint = getSourceHint(event.sourceUrl);
+  const { junctionQueries, streetOnlyQuery } = segmentQueries(location);
   const queries = [
+    ...junctionQueries,
     sourceHint ? `${location}, ${sourceHint}, NY` : null,
     `${location}, New York, NY`,
     placeName && sourceHint ? `${placeName}, ${sourceHint}, NY` : null,
     placeName ? `${placeName}, New York, NY` : null,
     address ? `${address}, New York, NY` : null,
+    streetOnlyQuery,
   ].filter((query): query is string => Boolean(query));
 
   return [...new Set(queries.map((query) => query.replace(/\s+/g, " ").trim()))];
@@ -159,12 +211,38 @@ function scoreResult(
   return score;
 }
 
-async function search(query: string): Promise<NominatimResult[]> {
-  const waitMs = REQUEST_INTERVAL_MS - (Date.now() - lastRequestAt);
-  if (waitMs > 0) {
-    await new Promise((resolve) => setTimeout(resolve, waitMs));
+export class RateLimitedError extends Error {
+  constructor(status: number) {
+    super(`Nominatim returned ${status}`);
+    this.name = "RateLimitedError";
   }
-  lastRequestAt = Date.now();
+}
+
+export interface GeocoderDeps {
+  db?: Firestore;
+  fetch?: typeof fetch;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+export async function reserveNominatimRequest(db: Firestore, nowMs: number): Promise<number> {
+  const ref = db.collection("_pipelineRateLimits").doc("nominatim");
+  return db.runTransaction(async (tx) => {
+    const raw = (await tx.get(ref)).data()?.requestAtMs;
+    const previous = typeof raw === "number" && Number.isFinite(raw) ? raw : 0;
+    const requestAtMs = Math.max(nowMs, previous + REQUEST_INTERVAL_MS);
+    tx.set(ref, { requestAtMs });
+    return requestAtMs;
+  });
+}
+
+async function search(query: string, db: Firestore, deps: GeocoderDeps): Promise<NominatimResult[]> {
+  // One shared reservation survives replica changes and covers *requests*,
+  // not just queue dispatches (one task can try several fallback queries).
+  const now = deps.now ?? Date.now;
+  const requestAt = await reserveNominatimRequest(db, now());
+  const waitMs = requestAt - now();
+  if (waitMs > 0) await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(waitMs);
 
   const params = new URLSearchParams({
     q: query,
@@ -176,16 +254,35 @@ async function search(query: string): Promise<NominatimResult[]> {
     bounded: "1",
     dedupe: "1",
   });
-  const response = await fetch(`https://nominatim.openstreetmap.org/search?${params}`, {
-    headers: {
-      "User-Agent": "PulseNYC/1.0 (https://pulse-3ed92.web.app)",
-      "Accept-Language": "en-US,en",
-    },
-  });
-  if (!response.ok) {
-    throw new Error(`Nominatim returned ${response.status}`);
+  try {
+    const response = await (deps.fetch ?? fetch)(`https://nominatim.openstreetmap.org/search?${params}`, {
+      signal: AbortSignal.timeout(15_000),
+      headers: {
+        "User-Agent": "PulseNYC/1.0 (https://pulse-3ed92.web.app)",
+        "Accept-Language": "en-US,en",
+      },
+    });
+    if (!response.ok) {
+      if (response.status === 429) throw new RateLimitedError(response.status);
+      throw new Error(`Nominatim returned ${response.status}`);
+    }
+    return (await response.json()) as NominatimResult[];
+  } finally {
+    // A slow reservation can leave its nominal timestamp behind the actual
+    // dispatch. Keep the global stage lease through this post-response/body
+    // cooldown, covering fallback queries and handoff to a fresh instance.
+    await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(REQUEST_INTERVAL_MS);
   }
-  return (await response.json()) as NominatimResult[];
+}
+
+// Thrown when no query found the place and at least one lookup failed with an
+// error (rate limit, network, server error) rather than returning no results,
+// so the place may still exist and the event is worth retrying later.
+export class LocationLookupError extends Error {
+  constructor(location: string, cause: unknown) {
+    super(`Location lookup failed for "${location}": ${String(cause)}`);
+    this.name = "LocationLookupError";
+  }
 }
 
 function cacheId(event: ScrapedEvent): string {
@@ -194,7 +291,8 @@ function cacheId(event: ScrapedEvent): string {
 }
 
 export async function resolveEventLocation(
-  event: ScrapedEvent
+  event: ScrapedEvent,
+  deps: GeocoderDeps = {}
 ): Promise<ResolvedLocation | null> {
   if (!event.location.trim()) return null;
   if (isGenericNycLocation(event.location)) {
@@ -202,7 +300,7 @@ export async function resolveEventLocation(
     return null;
   }
 
-  const db = getFirestore();
+  const db = deps.db ?? getFirestore();
   const cacheRef = db.collection(CACHE_COLLECTION).doc(cacheId(event));
   const cached = await cacheRef.get();
   if (cached.exists) {
@@ -211,9 +309,10 @@ export async function resolveEventLocation(
     return data;
   }
 
+  let lookupError: unknown = null;
   for (const query of buildQueries(event)) {
     try {
-      const results = await search(query);
+      const results = await search(query, db, deps);
       if (results.length === 0) continue;
 
       const ranked = results
@@ -246,9 +345,22 @@ export async function resolveEventLocation(
       return resolved;
     } catch (error) {
       console.warn(`Location lookup failed for "${query}":`, error);
+      lookupError = error;
+      if (error instanceof RateLimitedError) {
+        // Nominatim is throttling this egress IP (e.g. overlapping scrape
+        // invocations). Hammering the remaining fallback queries only
+        // extends the block; give up on this event and pause so subsequent
+        // events back off instead of each issuing a full query storm.
+        console.warn("Nominatim rate limited; skipping remaining queries for this event");
+        await (deps.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))))(RATE_LIMIT_COOLDOWN_MS);
+        break;
+      }
     }
   }
 
+  if (lookupError) {
+    throw new LocationLookupError(event.location, lookupError);
+  }
   console.warn(`No exact NYC location found for "${event.location}"; event will not get a pin`);
   return null;
 }

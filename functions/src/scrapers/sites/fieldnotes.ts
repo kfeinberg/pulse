@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import { parseEventsFromText, stripHtml } from "../../services/parser.js";
+import type { ExtractionCache } from "../../services/extractionCache.js";
+import { parseNewItems, stripHtml } from "../../services/parser.js";
 
 const BASE_URL = "https://fieldnotesnyc.substack.com/";
 const FETCH_HEADERS = {
@@ -40,7 +41,7 @@ async function fetchJson<T>(url: string): Promise<T | null> {
 export function createFieldnotesScraper(apiKey: string): EventSource {
   return {
     name: "fieldnotes",
-    async scrape(): Promise<ScrapedEvent[]> {
+    async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       // Substack's public archive API lists posts newest-first. The archive
       // entries carry no body text, so each post is fetched individually
       // for its full body_html. Paid posts return only their public free
@@ -88,14 +89,12 @@ export function createFieldnotesScraper(apiKey: string): EventSource {
           (published ? `Published (Eastern Time): ${formatET(published)}\n` : "") +
           `URL: ${postUrl}\n\n`;
 
+        // Each post is one item: an unchanged roundup is not re-extracted.
         const fullText = header + stripHtml(post.body_html);
-        console.log(
-          `Sending Fieldnotes post "${post.title}" to Claude (${fullText.length} chars)`
-        );
-
-        const parsedEvents = await parseEventsFromText(
-          fullText,
-          "fieldnotes",
+        const { events: parsedEvents } = await parseNewItems(
+          [fullText],
+          (text) => text,
+          cache,
           postUrl,
           apiKey
         );

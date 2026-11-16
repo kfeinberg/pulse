@@ -1,0 +1,11 @@
+{
+  "indexes": [
+    { "collectionGroup": "pipeline_items", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "source", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "pipeline_accepted", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "source", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "pipeline_pinned", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "source", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "pipeline_written", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "source", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "pipeline_quarantine", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "stage", "order": "ASCENDING" }, { "fieldPath": "released", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] },
+    { "collectionGroup": "pipeline_quarantine", "queryScope": "COLLECTION", "fields": [{ "fieldPath": "stage", "order": "ASCENDING" }, { "fieldPath": "released", "order": "ASCENDING" }, { "fieldPath": "source", "order": "ASCENDING" }, { "fieldPath": "createdAt", "order": "ASCENDING" }] }
+  ],
+  "fieldOverrides": []
+}

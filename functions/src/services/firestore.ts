@@ -1,10 +1,24 @@
-import { getFirestore, Timestamp, type DocumentReference } from "firebase-admin/firestore";
+import { getFirestore, Timestamp, type DocumentReference, type Firestore } from "firebase-admin/firestore";
 import Anthropic from "@anthropic-ai/sdk";
 import { ScrapedEvent } from "../scrapers/base.js";
-import { resolveEventLocation, type ResolvedLocation } from "./geocoder.js";
+import { type ResolvedLocation } from "./geocoder.js";
 import { isUsableEventUrl } from "./eventUrl.js";
-import { temporalExclusionReason } from "./temporalFilter.js";
+import { addDays, etDateParts, etTimestamp } from "./etTime.js";
 
+export function nycDayBounds(timestamp: number): { start: number; end: number } {
+  const date = etDateParts(timestamp);
+  const next = addDays(date, 1);
+  return { start: etTimestamp(date.year, date.month, date.day, 0, 0), end: etTimestamp(next.year, next.month, next.day, 0, 0) };
+}
+
+export function parseDuplicateResponse(text: string, candidateCount: number): number | null {
+  if (text === "none") return null;
+  if (/^\d+$/.test(text)) {
+    const index = Number(text);
+    if (Number.isSafeInteger(index) && index < candidateCount) return index;
+  }
+  throw new Error("Invalid duplicate-matching response");
+}
 
 const EVENTS_COLLECTION = "events";
 
@@ -91,7 +105,9 @@ async function findFuzzyDuplicate(
 ): Promise<string | null> {
   if (candidates.length === 0) return null;
 
-  const client = new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
+  // Keep a single provider call below the 300s write-task deadline. Retry
+  // at the queue boundary, not inside an SDK whose timeout outlives the task.
+  const client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 0 });
 
   const candidateList = candidates
     .map((c, i) => `${i}: "${c.title}" at "${c.location}" on ${c.startTime.toDate().toISOString()}`)
@@ -117,160 +133,115 @@ If one is the same event, respond with ONLY the number (e.g. "0"). If none match
 
   const text = message.content[0].type === "text" ? message.content[0].text.trim() : "";
 
-  if (text === "none") return null;
-
-  const index = parseInt(text, 10);
-  if (!isNaN(index) && index >= 0 && index < candidates.length) {
-    return candidates[index].id;
-  }
-
-  return null;
+  const index = parseDuplicateResponse(text, candidates.length);
+  return index === null ? null : candidates[index].id;
 }
 
-export async function writeScrapedEvents(
-  events: ScrapedEvent[],
-  apiKey: string
-): Promise<number> {
-  const db = getFirestore();
-  let addedCount = 0;
-  let mergedCount = 0;
-  let skippedExact = 0;
+export type UpsertOutcome =
+  | { kind: "added"; eventId: string }
+  | { kind: "merged"; eventId: string; match: "title+time" | "title+location" | "fuzzy" }
+  | { kind: "skipped"; reason: string };
 
-  const validEvents = events.filter((event) => {
-    if (!event.title) {
-      console.log(`Skipped: no title`);
-      return false;
+// Dedup-and-write for one event: the write stage of the pipeline. Exact
+// matches merge first (title + start time + place, then title + place), then
+// an LLM fuzzy match against same-day events. A merge never overwrites the
+// category; it adds the source URL and refreshes the pin. New events need an
+// exact location.
+//
+// addId makes the insert idempotent: a redelivered task that already added
+// this event finds the document and reports it instead of adding it twice.
+// Fuzzy-match failures throw so the queue retries the task.
+export async function upsertEvent(
+  event: ScrapedEvent,
+  geo: ResolvedLocation | null,
+  apiKey: string,
+  addId: string,
+  deps: { db?: Firestore; fuzzyDuplicate?: typeof findFuzzyDuplicate } = {}
+): Promise<UpsertOutcome> {
+  const db = deps.db ?? getFirestore();
+  const category = event.category ?? "happening";
+  const startDate = new Date(event.startTimestamp);
+  const endDate = new Date(event.endTimestamp);
+  const candidateUrl = event.sourceUrl || null;
+  const newUrl = candidateUrl && isUsableEventUrl(candidateUrl) ? candidateUrl : null;
+
+  const merge = async (
+    ref: DocumentReference,
+    data: Record<string, unknown> | undefined,
+    match: "title+time" | "title+location" | "fuzzy"
+  ): Promise<UpsertOutcome> => {
+    await updateResolvedLocation(ref, geo);
+    if (data && newUrl && (await updateSourceUrl(ref, data, newUrl))) {
+      console.log(`Updated source URL (${match}): "${event.title}"`);
     }
-    const temporalReason = temporalExclusionReason(event);
-    if (temporalReason) {
-      console.log(`Skipped before write (${temporalReason})`);
-      return false;
-    }
-    return true;
-  });
+    return { kind: "merged", eventId: ref.id, match };
+  };
 
-  console.log(`${events.length} total, ${validEvents.length} valid to process`);
+  const existing = await db.collection(EVENTS_COLLECTION).doc(addId).get();
+  if (existing.exists) {
+    return { kind: "added", eventId: addId };
+  }
 
-  for (let i = 0; i < validEvents.length; i++) {
-    const event = validEvents[i];
-    const category = event.category ?? "happening";
+  // Exact dedup: same title + start time, at the same named place. Multi-location
+  // events often share a title and start time but need separate pins.
+  const titleTimeQuery = await db
+    .collection(EVENTS_COLLECTION)
+    .where("title", "==", event.title)
+    .where("startTime", "==", Timestamp.fromDate(startDate))
+    .get();
+  const titleTimeMatch = titleTimeQuery.docs.find(
+    (doc) => (doc.data().location || "").trim().toLowerCase() === event.location.trim().toLowerCase()
+  );
+  if (titleTimeMatch) {
+    return merge(titleTimeMatch.ref, titleTimeMatch.data(), "title+time");
+  }
 
-    const startDate = new Date(event.startTimestamp);
-    const endDate = new Date(event.endTimestamp);
-
-    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) {
-      console.warn(`Skipped: invalid timestamp for "${event.title}" (start=${event.startTimestamp}, end=${event.endTimestamp})`);
-      continue;
-    }
-
-    const candidateUrl = event.sourceUrl || null;
-    const newUrl = candidateUrl && isUsableEventUrl(candidateUrl) ? candidateUrl : null;
-    const geo = await resolveEventLocation(event);
-
-    // Exact dedup: same title + same start time
-    const titleTimeQuery = await db
+  // Exact dedup: same title + same location
+  if (event.location) {
+    const titleLocQuery = await db
       .collection(EVENTS_COLLECTION)
       .where("title", "==", event.title)
-      .where("startTime", "==", Timestamp.fromDate(startDate))
+      .where("location", "==", event.location)
       .get();
+    // Recurring shows at the same venue are distinct events. Only merge a
+    // title/place match when its actual time interval overlaps this one.
+    const doc = titleLocQuery.docs.find((candidate) => {
+      const data = candidate.data();
+      const start = data.startTime?.toMillis?.();
+      const end = data.endTime?.toMillis?.();
+      return typeof start === "number" && typeof end === "number" && start < event.endTimestamp && end > event.startTimestamp;
+    });
+    if (doc) return merge(doc.ref, doc.data(), "title+location");
+  }
 
-    const titleTimeMatch = titleTimeQuery.docs.find(
-      (doc) => (doc.data().location || "").trim().toLowerCase() === event.location.trim().toLowerCase()
-    );
-    if (titleTimeMatch) {
-      // Only merge title+time matches at the same named place. Multi-location
-      // events often share a title and start time but need separate pins.
-      const existingDoc = titleTimeMatch;
-      await updateResolvedLocation(existingDoc.ref, geo);
-      if (newUrl) {
-        if (await updateSourceUrl(existingDoc.ref, existingDoc.data(), newUrl)) {
-          mergedCount++;
-          console.log(`Updated source URL (title+time): "${event.title}"`);
-        } else {
-          skippedExact++;
-        }
-      } else {
-        skippedExact++;
-      }
-      continue;
+  // Fuzzy dedup: find events on the same day and ask Claude
+  const day = nycDayBounds(event.startTimestamp);
+  const sameDayQuery = await db
+    .collection(EVENTS_COLLECTION)
+    .where("startTime", ">=", Timestamp.fromMillis(day.start))
+    .where("startTime", "<", Timestamp.fromMillis(day.end))
+    .get();
+  if (!sameDayQuery.empty) {
+    const candidates = sameDayQuery.docs.map((doc) => ({
+      id: doc.id,
+      title: doc.data().title,
+      location: doc.data().location || "",
+      startTime: doc.data().startTime,
+    }));
+    const matchId = await (deps.fuzzyDuplicate ?? findFuzzyDuplicate)(event, startDate, candidates, apiKey);
+    if (matchId) {
+      const matchRef = db.collection(EVENTS_COLLECTION).doc(matchId);
+      const matchDoc = await matchRef.get();
+      return merge(matchRef, matchDoc.data(), "fuzzy");
     }
+  }
 
-    // Exact dedup: same title + same location
-    if (event.location) {
-      const titleLocQuery = await db
-        .collection(EVENTS_COLLECTION)
-        .where("title", "==", event.title)
-        .where("location", "==", event.location)
-        .limit(1)
-        .get();
+  if (!geo) {
+    return { kind: "skipped", reason: `unresolved location "${event.location}"` };
+  }
 
-      if (!titleLocQuery.empty) {
-        const existingDoc = titleLocQuery.docs[0];
-        await updateResolvedLocation(existingDoc.ref, geo);
-        if (newUrl) {
-          if (await updateSourceUrl(existingDoc.ref, existingDoc.data(), newUrl)) {
-            mergedCount++;
-            console.log(`Updated source URL (title+loc): "${event.title}"`);
-          } else {
-            skippedExact++;
-          }
-        } else {
-          skippedExact++;
-        }
-        continue;
-      }
-    }
-
-    // Fuzzy dedup: find events on the same day and ask Claude
-    const dayStart = new Date(startDate);
-    dayStart.setHours(0, 0, 0, 0);
-    const dayEnd = new Date(startDate);
-    dayEnd.setHours(23, 59, 59, 999);
-
-    const sameDayQuery = await db
-      .collection(EVENTS_COLLECTION)
-      .where("startTime", ">=", Timestamp.fromDate(dayStart))
-      .where("startTime", "<=", Timestamp.fromDate(dayEnd))
-      .get();
-
-    if (!sameDayQuery.empty) {
-      const candidates = sameDayQuery.docs.map((doc) => ({
-        id: doc.id,
-        title: doc.data().title,
-        location: doc.data().location || "",
-        startTime: doc.data().startTime,
-      }));
-
-      try {
-        const matchId = await findFuzzyDuplicate(event, startDate, candidates, apiKey);
-        if (matchId) {
-          const matchRef = db.collection(EVENTS_COLLECTION).doc(matchId);
-          await updateResolvedLocation(matchRef, geo);
-          const matchDoc = await matchRef.get();
-          const matchData = matchDoc.data();
-          if (matchData && newUrl) {
-            if (await updateSourceUrl(matchRef, matchData, newUrl)) {
-              mergedCount++;
-              console.log(`Updated source URL (fuzzy match): "${event.title}" → "${matchData.title}"`);
-            } else {
-              skippedExact++;
-              console.log(`Skipped (fuzzy, URL exists): "${event.title}"`);
-            }
-          }
-          continue;
-        }
-      } catch (err) {
-        console.warn(`Fuzzy dedup failed for "${event.title}", proceeding to add:`, err);
-      }
-    }
-
-    // No duplicate found — add only events whose location can be resolved exactly.
-    if (!geo) {
-      console.warn(`Skipped: unresolved location for "${event.title}" at "${event.location}"`);
-      continue;
-    }
-
-    await db.collection(EVENTS_COLLECTION).add({
+  try {
+    await db.collection(EVENTS_COLLECTION).doc(addId).create({
       title: event.title,
       description: event.description,
       location: event.location,
@@ -284,13 +255,10 @@ export async function writeScrapedEvents(
       sourceUrls: newUrl ? [newUrl] : [],
       createdAt: Timestamp.now(),
     });
-
-    addedCount++;
-    console.log(`Added [${category}]: "${event.title}"`);
+  } catch (error) {
+    // ALREADY_EXISTS: a concurrent delivery of the same task got there first.
+    if ((error as { code?: number }).code !== 6) throw error;
   }
-
-  console.log(
-    `Done: ${addedCount} added, ${mergedCount} merged, ${skippedExact} exact duplicates skipped`
-  );
-  return addedCount;
+  console.log(`Added [${category}]: "${event.title}"`);
+  return { kind: "added", eventId: addId };
 }
