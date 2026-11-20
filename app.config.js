@@ -52,12 +52,15 @@ export default {
       [
         "expo-splash-screen",
         {
+          // The art's own background is #1a1a1a. A matching launch color (in
+          // light and dark mode) keeps it from showing as a box, and matches
+          // the in-app splash that takes over from it.
           image: "./assets/images/splash-icon.png",
           imageWidth: 200,
           resizeMode: "contain",
-          backgroundColor: "#ffffff",
+          backgroundColor: "#1a1a1a",
           dark: {
-            backgroundColor: "#000000",
+            backgroundColor: "#1a1a1a",
           },
         },
       ],

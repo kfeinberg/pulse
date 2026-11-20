@@ -13,6 +13,8 @@ import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
 import { buildTimeline, eventStatus, formatClock, formatDayLabel, formatEventRange, matchesSearch, nextBusySnap } from '@/utils/eventTime';
 
+// The native launch screen's image (expo-splash-screen in app.config.js).
+const SPLASH_ART = require('../assets/images/splash-icon.png');
 const WELCOME_KEY = 'pulse_welcomed';
 const UPCOMING_BROWSER_HOURS = 72;
 
@@ -88,6 +90,8 @@ export default function MapScreen() {
   const [welcomeChecked, setWelcomeChecked] = useState(false);
   const [splashOpacity] = useState(() => new Animated.Value(1));
   const [dotScale] = useState(() => new Animated.Value(1));
+  const [splashArtScale] = useState(() => new Animated.Value(1));
+  const [splashTitleOpacity] = useState(() => new Animated.Value(0));
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
   const [showListView, setShowListView] = useState(false);
@@ -181,6 +185,20 @@ export default function MapScreen() {
     loop.start();
     return () => loop.stop();
   }, [dotScale]);
+
+  // The launch art starts exactly where the native splash left it, then the
+  // name fades in beneath it and the rings breathe while events load.
+  useEffect(() => {
+    Animated.timing(splashTitleOpacity, { toValue: 1, duration: 450, delay: 150, useNativeDriver: true }).start();
+    const breathe = Animated.loop(
+      Animated.sequence([
+        Animated.timing(splashArtScale, { toValue: 0.95, duration: 1100, useNativeDriver: true }),
+        Animated.timing(splashArtScale, { toValue: 1, duration: 1100, useNativeDriver: true }),
+      ])
+    );
+    breathe.start();
+    return () => breathe.stop();
+  }, [splashArtScale, splashTitleOpacity]);
 
   // Fade out splash once data arrives and welcome is not needed
   useEffect(() => {
@@ -1376,11 +1394,17 @@ export default function MapScreen() {
         </View>
       )}
 
-      {/* Splash screen (covers everything until data loads) */}
+      {/* Splash (covers everything until data loads). Its first frame matches
+          the native launch screen exactly: the same art, size and background,
+          so the handoff from native to JS is invisible. */}
       <Animated.View style={[styles.splash, { opacity: splashOpacity }]} pointerEvents="none">
-        <Animated.View style={[styles.splashDot, { transform: [{ scale: dotScale }] }]} />
-        <Text style={styles.splashTitle}>Pulse</Text>
-        <Text style={styles.splashSubtitle}>NYC Events</Text>
+        <Animated.Image
+          source={SPLASH_ART}
+          style={[styles.splashArt, { transform: [{ scale: splashArtScale }] }]}
+          resizeMode="contain"
+          accessibilityIgnoresInvertColors
+        />
+        <Animated.Text style={[styles.splashTitle, { opacity: splashTitleOpacity }]}>Pulse</Animated.Text>
       </Animated.View>
     </View>
   );
@@ -2353,23 +2377,22 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 20,
   },
-  splashDot: {
-    width: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#ff5252',
-    marginBottom: 16,
+  // Same size as the native splash image (expo-splash-screen imageWidth).
+  splashArt: {
+    width: 200,
+    height: 200,
   },
+  // Placed below the centered art without moving it off center.
   splashTitle: {
+    position: 'absolute',
+    top: '50%',
+    left: 0,
+    right: 0,
+    marginTop: 104,
+    textAlign: 'center',
     color: '#fff',
-    fontSize: 36,
+    fontSize: 30,
     fontWeight: '700',
     letterSpacing: 1,
-  },
-  splashSubtitle: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontSize: 16,
-    marginTop: 6,
-    fontWeight: '500',
   },
 });
