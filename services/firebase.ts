@@ -95,6 +95,19 @@ export async function deleteEvent(eventId: string): Promise<void> {
   await deleteDoc(doc(db, EVENTS_COLLECTION, eventId));
 }
 
+// Live updates for one event. Calls back with null once it no longer exists
+// (ended events are cleaned up daily), so a stale deep link can say so.
+export function subscribeToEvent(
+  eventId: string,
+  callback: (event: AppEvent | null) => void
+): () => void {
+  return onSnapshot(
+    doc(db, EVENTS_COLLECTION, eventId),
+    (snapshot) => callback(snapshot.exists() ? ({ id: snapshot.id, ...snapshot.data() } as AppEvent) : null),
+    (error) => console.warn('Event subscription failed:', error)
+  );
+}
+
 export async function voteOnEvent(
   eventId: string,
   voteType: 'up' | 'down',

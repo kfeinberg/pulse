@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react';
-import { StyleSheet, View, TouchableOpacity, Text, Alert, Animated, ScrollView, Linking, TextInput, Modal, Image, Platform } from 'react-native';
+import { StyleSheet, View, TouchableOpacity, Text, Alert, Animated, ScrollView, Linking, TextInput, Modal, Image, Platform, AppState, useWindowDimensions } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
-import { useRouter } from 'expo-router';
+import { useFocusEffect, useRouter } from 'expo-router';
 import { AppEvent, Report, ReportCategory, EventCategory, FlagReason } from '@/types';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport, deleteAccount, flagContent } from '@/services/firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from '@/services/votes';
@@ -11,9 +11,9 @@ import { MAP_STYLE } from '@/constants/mapStyle';
 import { useAuth } from '@/contexts/AuthContext';
 import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
+import { buildTimeline, eventStatus, formatClock, formatDayLabel, formatEventRange, matchesSearch, nextBusySnap } from '@/utils/eventTime';
 
 const WELCOME_KEY = 'pulse_welcomed';
-const HOUR_MS = 60 * 60 * 1000;
 const UPCOMING_BROWSER_HOURS = 72;
 
 function getDateKey(time: Date): string {
@@ -91,7 +91,10 @@ export default function MapScreen() {
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
   const [showListView, setShowListView] = useState(false);
-  const [listTimelineIndex, setListTimelineIndex] = useState(0);
+  // The browsed instant: null follows the live clock ("Now").
+  const [selectedTime, setSelectedTime] = useState<number | null>(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const { height: windowHeight } = useWindowDimensions();
   const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
   const [mapPickerStep, setMapPickerStep] = useState<'main' | 'day' | 'time'>('main');
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
@@ -146,10 +149,17 @@ export default function MapScreen() {
     );
   };
 
-  // Keep relative-time labels and future-event affordances current.
+  // Keep "Now", relative-time labels and future-event affordances current,
+  // including right after the app comes back from the background.
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
-    return () => clearInterval(timer);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setCurrentTime(Date.now());
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
   }, []);
 
   // Check if user has seen welcome before
@@ -226,29 +236,15 @@ export default function MapScreen() {
     setShowWelcome(false);
   }, []);
 
-  const listTimelineSnaps = useMemo(() => {
-    const snaps: { label: string; time: Date }[] = [];
-    const now = new Date();
-    const endTime = new Date(now.getTime() + UPCOMING_BROWSER_HOURS * HOUR_MS);
-    snaps.push({ label: 'Now', time: now });
-
-    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const firstSnap = new Date(now);
-    firstSnap.setMinutes(0, 0, 0);
-    firstSnap.setHours(firstSnap.getHours() + 1);
-
-    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + HOUR_MS)) {
-      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / (24 * HOUR_MS));
-      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
-      const h = d.getHours();
-      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-      const ampm = h < 12 ? 'AM' : 'PM';
-      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
-    }
-    return snaps;
-  }, []);
+  // Rebuilt from the live clock, so "Now" never freezes at launch time and
+  // hours that have passed drop out of the picker.
+  const listTimelineSnaps = useMemo(() => buildTimeline(currentTime, UPCOMING_BROWSER_HOURS), [currentTime]);
+  // A browsed hour that has since passed falls back to the live "Now".
+  const listTimelineIndex = useMemo(() => {
+    if (selectedTime === null) return 0;
+    const index = listTimelineSnaps.findIndex((snap) => snap.time.getTime() === selectedTime);
+    return index > 0 ? index : 0;
+  }, [listTimelineSnaps, selectedTime]);
 
   const listDayOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -281,16 +277,17 @@ export default function MapScreen() {
   const mapSelectedTime = listTimelineSnaps[listTimelineIndex].time.getTime();
 
   const applyListTimeIndex = useCallback((index: number) => {
-    setListTimelineIndex(index);
+    setSelectedTime(index === 0 ? null : listTimelineSnaps[index]?.time.getTime() ?? null);
     setSelectedEvent(null);
-  }, []);
+  }, [listTimelineSnaps]);
 
-  useEffect(() => {
+  // Reload on focus too: the event screen can change interest and hidden items.
+  useFocusEffect(useCallback(() => {
     getAllVotes().then(setVotes).catch(() => {});
     getInterestedEvents().then(setInterestedMap).catch(() => {});
     getConfirmedReports().then(setConfirmedMap).catch(() => {});
     getHiddenContent().then(setHiddenMap).catch(() => {});
-  }, []);
+  }, []));
 
   const handleVote = useCallback(async (event: AppEvent, voteType: 'up' | 'down') => {
     const previousVote = votes[event.id] ?? null;
@@ -465,16 +462,18 @@ export default function MapScreen() {
         endTime: selectedEvent.endTime.toMillis().toString(),
         sourceUrl: selectedEvent.sourceUrl ?? '',
         sourceUrls: JSON.stringify(selectedEvent.sourceUrls ?? (selectedEvent.sourceUrl ? [selectedEvent.sourceUrl] : [])),
+        latitude: String(selectedEvent.latitude),
+        longitude: String(selectedEvent.longitude),
       },
     });
   }, [selectedEvent, router]);
 
   const listEvents = useMemo(() => {
-    const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? currentTime;
     const filtered = allEvents.filter((event) =>
-      event.startTime.toMillis() <= selectedTime &&
-      event.endTime.toMillis() > selectedTime &&
-      activeCategories.has(event.category)
+      event.startTime.toMillis() <= mapSelectedTime &&
+      event.endTime.toMillis() > mapSelectedTime &&
+      activeCategories.has(event.category) &&
+      matchesSearch(event, searchQuery)
     );
     if (!userLocation) {
       return filtered.sort((a, b) => a.startTime.toMillis() - b.startTime.toMillis());
@@ -483,7 +482,23 @@ export default function MapScreen() {
       getDistance(userLocation.latitude, userLocation.longitude, a.latitude, a.longitude) -
       getDistance(userLocation.latitude, userLocation.longitude, b.latitude, b.longitude)
     );
-  }, [allEvents, activeCategories, listTimelineIndex, listTimelineSnaps, userLocation, currentTime]);
+  }, [allEvents, activeCategories, mapSelectedTime, userLocation, searchQuery]);
+
+  const timedEvents = useMemo(() => allEvents.map((event) => ({
+    category: event.category, startMs: event.startTime.toMillis(), endMs: event.endTime.toMillis(),
+  })), [allEvents]);
+  // From an empty hour, offer the next one with something on.
+  const nextBusy = useMemo(
+    () => (searchQuery.trim() ? null : nextBusySnap(listTimelineSnaps, listTimelineIndex, timedEvents, activeCategories)),
+    [searchQuery, listTimelineSnaps, listTimelineIndex, timedEvents, activeCategories]
+  );
+
+  // Pins expire after four hours; the subscription's query does not re-run.
+  const visibleReports = useMemo(
+    () => reports.filter((report) => !hiddenMap[report.id] && (report.expiresAt?.toMillis?.() ?? 0) > currentTime),
+    [reports, hiddenMap, currentTime]
+  );
+  const hiddenCategoryCount = CATEGORY_LIST.length - activeCategories.size;
 
   const eventsForMap = useMemo(() => {
     if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
@@ -496,26 +511,6 @@ export default function MapScreen() {
     if (miles < 0.1) return '< 0.1 mi';
     if (miles < 10) return `${miles.toFixed(1)} mi`;
     return `${Math.round(miles)} mi`;
-  };
-
-  const formatTime = (millis: number) => {
-    const d = new Date(millis);
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrow = new Date(today.getTime() + 86400000);
-    const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-
-    const h = d.getHours();
-    const hour = h % 12 || 12;
-    const ampm = h < 12 ? 'AM' : 'PM';
-    const min = d.getMinutes().toString().padStart(2, '0');
-    const time = `${hour}:${min} ${ampm}`;
-
-    if (eventDay.getTime() === today.getTime()) return `Today, ${time}`;
-    if (eventDay.getTime() === tomorrow.getTime()) return `Tomorrow, ${time}`;
-
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return `${months[d.getMonth()]} ${d.getDate()}, ${time}`;
   };
 
   const resetMapTime = () => {
@@ -569,7 +564,7 @@ export default function MapScreen() {
           );
         })}
         {/* Report markers */}
-        {reports.filter((r) => !hiddenMap[r.id]).map((report) => {
+        {visibleReports.map((report) => {
           const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
           return (
             <Marker
@@ -602,13 +597,16 @@ export default function MapScreen() {
       </MapView>
       {Platform.OS === 'ios' && <View pointerEvents="none" style={styles.mapTintOverlay} />}
 
-      {/* Category filter toggle + pills */}
+      {/* Category filter toggle + labeled pills */}
       {!selectedEvent && (
         <View style={styles.filterContainer}>
           <TouchableOpacity
             style={styles.filterToggle}
             onPress={() => setFiltersOpen((v) => !v)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={filtersOpen ? 'Close category filters' : 'Filter categories'}
+            accessibilityHint={hiddenCategoryCount > 0 ? `${hiddenCategoryCount} of ${CATEGORY_LIST.length} categories are hidden` : undefined}
           >
             {filtersOpen ? (
               <Text style={styles.filterToggleIcon}>✕</Text>
@@ -619,42 +617,78 @@ export default function MapScreen() {
                 <View style={[styles.layersDiamond, styles.layersDiamondBack]} />
               </View>
             )}
+            {!filtersOpen && hiddenCategoryCount > 0 && (
+              <View style={styles.filterBadge} pointerEvents="none">
+                <Text style={styles.filterBadgeText}>{activeCategories.size}</Text>
+              </View>
+            )}
           </TouchableOpacity>
-          {filtersOpen && CATEGORY_LIST.map((key, i) => {
-            const cat = CATEGORIES[key];
-            const active = activeCategories.has(key);
-            return (
-              <Animated.View
-                key={key}
-                style={{
-                  opacity: filterAnim,
-                  transform: [{
-                    scale: filterAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [0.5, 1],
-                    }),
-                  }, {
-                    translateY: filterAnim.interpolate({
-                      inputRange: [0, 1],
-                      outputRange: [-8, 0],
-                    }),
-                  }],
-                }}
-              >
+          {filtersOpen && (
+            <ScrollView
+              style={{ maxHeight: Math.max(240, windowHeight - 240) }}
+              contentContainerStyle={styles.filterList}
+              showsVerticalScrollIndicator={false}
+            >
+              {hiddenCategoryCount > 0 && (
                 <TouchableOpacity
-                  style={[
-                    styles.filterPill,
-                    { backgroundColor: active ? cat.color : 'rgba(30, 30, 30, 0.5)' },
-                    !active && styles.filterPillInactive,
-                  ]}
-                  onPress={() => toggleCategory(key)}
+                  style={styles.filterShowAll}
+                  onPress={() => setActiveCategories(new Set(CATEGORY_LIST))}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel="Show all categories"
                 >
-                  <Text style={styles.filterEmoji}>{cat.emoji}</Text>
+                  <Text style={styles.filterShowAllText}>Show all</Text>
                 </TouchableOpacity>
-              </Animated.View>
-            );
-          })}
+              )}
+              {CATEGORY_LIST.map((key) => {
+                const cat = CATEGORIES[key];
+                const active = activeCategories.has(key);
+                return (
+                  <Animated.View
+                    key={key}
+                    style={{
+                      opacity: filterAnim,
+                      transform: [{
+                        scale: filterAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [0.5, 1],
+                        }),
+                      }, {
+                        translateY: filterAnim.interpolate({
+                          inputRange: [0, 1],
+                          outputRange: [-8, 0],
+                        }),
+                      }],
+                    }}
+                  >
+                    <TouchableOpacity
+                      style={styles.filterRow}
+                      onPress={() => toggleCategory(key)}
+                      onLongPress={() => setActiveCategories(new Set([key]))}
+                      activeOpacity={0.7}
+                      accessibilityRole="button"
+                      accessibilityLabel={cat.label}
+                      accessibilityState={{ selected: active }}
+                      accessibilityHint="Shows or hides this category. Long-press to show only this category."
+                    >
+                      <View style={[styles.filterLabel, !active && styles.filterLabelInactive]}>
+                        <Text style={[styles.filterLabelText, !active && styles.filterLabelTextInactive]}>{cat.label}</Text>
+                      </View>
+                      <View
+                        style={[
+                          styles.filterPill,
+                          { backgroundColor: active ? cat.color : 'rgba(30, 30, 30, 0.5)' },
+                          !active && styles.filterPillInactive,
+                        ]}
+                      >
+                        <Text style={styles.filterEmoji}>{cat.emoji}</Text>
+                      </View>
+                    </TouchableOpacity>
+                  </Animated.View>
+                );
+              })}
+            </ScrollView>
+          )}
         </View>
       )}
 
@@ -664,6 +698,9 @@ export default function MapScreen() {
             style={styles.previewCard}
             onPress={handlePreviewPress}
             activeOpacity={0.9}
+            accessibilityRole="button"
+            accessibilityLabel={`${selectedEvent.title}. ${formatEventRange(selectedEvent.startTime.toMillis(), selectedEvent.endTime.toMillis(), currentTime)}`}
+            accessibilityHint="Opens event details"
           >
             <View style={styles.previewContent}>
               <Text style={styles.previewEmoji}>
@@ -679,7 +716,7 @@ export default function MapScreen() {
                   </Text>
                 ) : null}
                 <Text style={styles.previewTime}>
-                  {formatTime(selectedEvent.startTime.toMillis())} — {formatTime(selectedEvent.endTime.toMillis())}
+                  {formatEventRange(selectedEvent.startTime.toMillis(), selectedEvent.endTime.toMillis(), currentTime)}
                   {formatDistance(selectedEvent) && (
                     <Text style={styles.previewDistance}> · {formatDistance(selectedEvent)}</Text>
                   )}
@@ -694,6 +731,9 @@ export default function MapScreen() {
                 style={[styles.interestedButton, interestedMap[selectedEvent.id] && styles.interestedButtonActive]}
                 onPress={() => handleInterested(selectedEvent)}
                 activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel={`Interested, ${selectedEvent.interested ?? 0}`}
+                accessibilityState={{ selected: !!interestedMap[selectedEvent.id] }}
               >
                 <Text style={styles.interestedStar}>{interestedMap[selectedEvent.id] ? '⭐' : '☆'}</Text>
                 <Text style={[styles.interestedText, interestedMap[selectedEvent.id] && styles.interestedTextActive]}>
@@ -709,6 +749,9 @@ export default function MapScreen() {
                 style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'up' && styles.floatingVoteActive]}
                 onPress={() => handleVote(selectedEvent, 'up')}
                 activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel={`Thumbs up, ${selectedEvent.thumbsUp ?? 0}`}
+                accessibilityState={{ selected: votes[selectedEvent.id] === 'up' }}
               >
                 <Text style={styles.floatingVoteEmoji}>👍</Text>
                 <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'up' && styles.floatingVoteCountActive]}>
@@ -719,6 +762,9 @@ export default function MapScreen() {
                 style={[styles.floatingVoteButton, votes[selectedEvent.id] === 'down' && styles.floatingVoteDown]}
                 onPress={() => handleVote(selectedEvent, 'down')}
                 activeOpacity={0.8}
+                accessibilityRole="button"
+                accessibilityLabel={`Thumbs down, ${selectedEvent.thumbsDown ?? 0}`}
+                accessibilityState={{ selected: votes[selectedEvent.id] === 'down' }}
               >
                 <Text style={styles.floatingVoteEmoji}>👎</Text>
                 <Text style={[styles.floatingVoteCount, votes[selectedEvent.id] === 'down' && styles.floatingVoteCountActive]}>
@@ -738,11 +784,13 @@ export default function MapScreen() {
           setMapTimePickerOpen(true);
         }}
         activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityLabel={`Change time. Showing ${listTimelineIndex === 0 ? 'now' : `${formatDayLabel(mapSelectedTime, currentTime)}, ${formatClock(mapSelectedTime)}`}`}
       >
         <View>
           <Text style={styles.mapTimeLabel}>WHEN</Text>
           <Text style={styles.mapTimeValue}>
-            {listTimelineIndex === 0 ? 'Now' : formatTime(mapSelectedTime)}
+            {listTimelineIndex === 0 ? 'Now' : `${formatDayLabel(mapSelectedTime, currentTime)}, ${formatClock(mapSelectedTime)}`}
           </Text>
         </View>
         <Text style={styles.mapTimeChevron}>⌄</Text>
@@ -755,6 +803,8 @@ export default function MapScreen() {
           setShowListView((visible) => !visible);
         }}
         activeOpacity={0.8}
+        accessibilityRole="button"
+        accessibilityLabel={showListView ? 'Show map' : 'Show list'}
       >
         <Text style={styles.listToggleText}>{showListView ? '◉' : '☰'}</Text>
       </TouchableOpacity>
@@ -762,13 +812,15 @@ export default function MapScreen() {
       {showListView && (
         <View style={styles.listOverlay}>
           <View style={styles.listHeader}>
-            <View>
+            <View style={styles.listHeaderText}>
               <Text style={styles.listTitle}>
                 {listTimelineIndex === 0 ? 'Happening now' : `Happening ${listTimelineSnaps[listTimelineIndex]?.label}`}
               </Text>
-              <Text style={styles.listSubtitle}>Choose any time in the next 3 days</Text>
+              <Text style={styles.listSubtitle}>
+                {listEvents.length === 1 ? '1 event' : `${listEvents.length} events`} · choose any time in the next 3 days
+              </Text>
             </View>
-            <TouchableOpacity onPress={() => setShowListView(false)}>
+            <TouchableOpacity onPress={() => setShowListView(false)} accessibilityRole="button" accessibilityLabel="Close list">
               <Text style={styles.listClose}>✕</Text>
             </TouchableOpacity>
           </View>
@@ -800,9 +852,49 @@ export default function MapScreen() {
               </View>
             </TouchableOpacity>
           </View>
-          <ScrollView style={styles.listScroll}>
+          <View style={styles.listSearchRow}>
+            <TextInput
+              style={styles.listSearchInput}
+              placeholder="Search events or places"
+              placeholderTextColor="#999"
+              value={searchQuery}
+              onChangeText={setSearchQuery}
+              autoCorrect={false}
+              autoCapitalize="none"
+              returnKeyType="search"
+              accessibilityLabel="Search events or places"
+            />
+            {searchQuery.length > 0 && (
+              <TouchableOpacity
+                onPress={() => setSearchQuery('')}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Clear search"
+              >
+                <Text style={styles.listSearchClear}>✕</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <ScrollView style={styles.listScroll} keyboardShouldPersistTaps="handled" keyboardDismissMode="on-drag">
             {listEvents.length === 0 ? (
-              <Text style={styles.listEmpty}>No events are happening at this time.</Text>
+              <View style={styles.listEmptyState}>
+                <Text style={styles.listEmpty}>
+                  {searchQuery.trim()
+                    ? `No events match "${searchQuery.trim()}" at this time.`
+                    : 'Nothing is listed for this time.'}
+                </Text>
+                {searchQuery.trim() ? (
+                  <TouchableOpacity style={styles.listEmptyAction} onPress={() => setSearchQuery('')} accessibilityRole="button">
+                    <Text style={styles.listEmptyActionText}>Clear search</Text>
+                  </TouchableOpacity>
+                ) : nextBusy ? (
+                  <TouchableOpacity style={styles.listEmptyAction} onPress={() => applyListTimeIndex(nextBusy.index)} accessibilityRole="button">
+                    <Text style={styles.listEmptyActionText}>
+                      See {listTimelineSnaps[nextBusy.index].label} · {nextBusy.count === 1 ? '1 event' : `${nextBusy.count} events`}
+                    </Text>
+                  </TouchableOpacity>
+                ) : null}
+              </View>
             ) : listEvents.map((event) => {
               const category = CATEGORIES[event.category];
               if (!category) return null;
@@ -821,6 +913,9 @@ export default function MapScreen() {
                     }, 300);
                   }}
                   activeOpacity={0.7}
+                  accessibilityRole="button"
+                  accessibilityLabel={`${event.title}, ${category.label}`}
+                  accessibilityHint="Shows this event on the map"
                 >
                   <View style={[styles.listItemDot, { backgroundColor: category.color }]}>
                     <Text style={styles.listItemEmoji}>{category.emoji}</Text>
@@ -831,7 +926,9 @@ export default function MapScreen() {
                       <Text style={styles.listItemLocation} numberOfLines={1}>{event.location}</Text>
                     ) : null}
                     <Text style={styles.listItemMeta}>
-                      {formatTime(event.startTime.toMillis())}
+                      {listTimelineIndex === 0
+                        ? eventStatus(event.startTime.toMillis(), event.endTime.toMillis(), currentTime)
+                        : formatEventRange(event.startTime.toMillis(), event.endTime.toMillis(), currentTime)}
                       {formatDistance(event) && (
                         <Text style={styles.listItemDistance}> · {formatDistance(event)}</Text>
                       )}
@@ -848,6 +945,8 @@ export default function MapScreen() {
             style={styles.listMapButton}
             onPress={() => setShowListView(false)}
             activeOpacity={0.8}
+            accessibilityRole="button"
+            accessibilityLabel="Show map"
           >
             <Text style={styles.listMapButtonText}>◉</Text>
           </TouchableOpacity>
@@ -1093,6 +1192,8 @@ export default function MapScreen() {
                 style={styles.flagBtn}
                 onPress={() => handleFlagReport(selectedReport)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                accessibilityRole="button"
+                accessibilityLabel="Report this pin"
               >
                 <Text style={styles.flagBtnText}>⚑</Text>
               </TouchableOpacity>
@@ -1155,6 +1256,8 @@ export default function MapScreen() {
             ]);
           }}
           activeOpacity={0.8}
+          accessibilityRole="button"
+          accessibilityLabel="Account"
         >
           {user.photoURL ? (
             <Image source={{ uri: user.photoURL }} style={styles.profileImage} />
@@ -1326,8 +1429,71 @@ const styles = StyleSheet.create({
     top: 60,
     right: 16,
     flexDirection: 'column',
+    alignItems: 'flex-end',
+    gap: 8,
+  },
+  filterList: {
+    alignItems: 'flex-end',
+    gap: 8,
+    paddingBottom: 4,
+  },
+  filterRow: {
+    flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+  },
+  filterLabel: {
+    backgroundColor: 'rgba(30, 30, 30, 0.85)',
+    borderRadius: 12,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  filterLabelInactive: {
+    backgroundColor: 'rgba(30, 30, 30, 0.55)',
+  },
+  filterLabelText: {
+    color: '#fff',
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  filterLabelTextInactive: {
+    color: 'rgba(255, 255, 255, 0.6)',
+    textDecorationLine: 'line-through',
+  },
+  filterShowAll: {
+    backgroundColor: '#fff',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 7,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  filterShowAllText: {
+    color: '#1a1a1a',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  filterBadge: {
+    position: 'absolute',
+    top: -3,
+    right: -3,
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    paddingHorizontal: 5,
+    backgroundColor: '#ff5252',
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: '#fff',
+  },
+  filterBadgeText: {
+    color: '#fff',
+    fontSize: 11,
+    fontWeight: '800',
   },
   filterToggle: {
     width: 50,
@@ -1598,10 +1764,51 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: '#eee',
   },
+  listHeaderText: {
+    flex: 1,
+    paddingRight: 12,
+  },
   listTitle: {
     fontSize: 22,
     fontWeight: '700',
     color: '#1a1a1a',
+  },
+  listSearchRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 14,
+    marginVertical: 10,
+    paddingHorizontal: 12,
+    borderRadius: 12,
+    backgroundColor: '#f2f2f2',
+  },
+  listSearchInput: {
+    flex: 1,
+    paddingVertical: 10,
+    fontSize: 15,
+    color: '#1a1a1a',
+  },
+  listSearchClear: {
+    fontSize: 14,
+    color: '#888',
+    paddingLeft: 8,
+  },
+  listEmptyState: {
+    alignItems: 'center',
+    paddingHorizontal: 30,
+    paddingVertical: 48,
+    gap: 14,
+  },
+  listEmptyAction: {
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    backgroundColor: '#1a1a1a',
+  },
+  listEmptyActionText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
   },
   listSubtitle: {
     fontSize: 12,
@@ -1766,8 +1973,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: '#777',
     textAlign: 'center',
-    paddingHorizontal: 30,
-    paddingVertical: 48,
   },
   listClose: {
     fontSize: 20,

@@ -1,11 +1,12 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share, ActivityIndicator } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { CATEGORIES, ADMIN_EMAIL } from '@/constants/categories';
-import { EventCategory, Comment, FlagReason } from '@/types';
+import { AppEvent, EventCategory, Comment, FlagReason } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
-import { subscribeToComments, addComment, deleteEvent, flagContent } from '@/services/firebase';
-import { getHiddenContent, setHidden } from '@/services/votes';
+import { subscribeToComments, subscribeToEvent, addComment, deleteEvent, flagContent, markInterested } from '@/services/firebase';
+import { getHiddenContent, getInterestedEvents, setHidden, setInterested as setInterestedLocal } from '@/services/votes';
+import { eventStatus, formatEventRange } from '@/utils/eventTime';
 
 const FLAG_REASONS: { value: FlagReason; label: string }[] = [
   { value: 'spam', label: 'Spam' },
@@ -14,27 +15,37 @@ const FLAG_REASONS: { value: FlagReason; label: string }[] = [
   { value: 'misleading', label: 'Misleading' },
 ];
 
+function parseUrls(sourceUrls?: string, sourceUrl?: string): string[] {
+  if (sourceUrls) {
+    try {
+      const parsed = JSON.parse(sourceUrls);
+      if (Array.isArray(parsed)) return parsed.filter((url): url is string => typeof url === 'string');
+    } catch {}
+  }
+  return sourceUrl ? [sourceUrl] : [];
+}
+
+function finiteNumber(value?: string): number | null {
+  if (!value) return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
 
 export default function EventDetailScreen() {
-  const { id, title, category, description, location, startTime, endTime, sourceUrl, sourceUrls } = useLocalSearchParams<{
+  const params = useLocalSearchParams<{
     id: string;
-    title: string;
-    category: EventCategory;
-    description: string;
-    location: string;
-    startTime: string;
-    endTime: string;
-    sourceUrl: string;
-    sourceUrls: string;
+    title?: string;
+    category?: EventCategory;
+    description?: string;
+    location?: string;
+    startTime?: string;
+    endTime?: string;
+    sourceUrl?: string;
+    sourceUrls?: string;
+    latitude?: string;
+    longitude?: string;
   }>();
-
-  const urls = useMemo((): string[] => {
-    if (sourceUrls) {
-      try { return JSON.parse(sourceUrls); } catch {}
-    }
-    if (sourceUrl) return [sourceUrl];
-    return [];
-  }, [sourceUrl, sourceUrls]);
+  const { id } = params;
 
   const { user, displayName } = useAuth();
   const router = useRouter();
@@ -43,10 +54,35 @@ export default function EventDetailScreen() {
   const [submitting, setSubmitting] = useState(false);
   const [hiddenMap, setHiddenMap] = useState<Record<string, boolean>>({});
   const [currentTime, setCurrentTime] = useState(() => Date.now());
+  // undefined while loading; null once the event no longer exists.
+  const [liveEvent, setLiveEvent] = useState<AppEvent | null | undefined>(undefined);
+  const [interested, setInterested] = useState(false);
 
-  const categoryConfig = CATEGORIES[category as EventCategory];
-  const start = useMemo(() => new Date(Number(startTime)), [startTime]);
-  const end = useMemo(() => new Date(Number(endTime)), [endTime]);
+  // The map passes a snapshot for an instant first render; the live document
+  // keeps counts and corrected times current, and serves links that carry
+  // only an id (a tapped reminder notification).
+  const event = useMemo(() => {
+    const startMs = liveEvent?.startTime?.toMillis?.() ?? finiteNumber(params.startTime);
+    const endMs = liveEvent?.endTime?.toMillis?.() ?? finiteNumber(params.endTime);
+    const title = liveEvent?.title ?? params.title;
+    if (!title || startMs === null || endMs === null) return null;
+    return {
+      title,
+      category: (liveEvent?.category ?? params.category) as EventCategory | undefined,
+      description: liveEvent?.description ?? params.description ?? '',
+      location: liveEvent?.location ?? params.location ?? '',
+      startMs,
+      endMs,
+      urls: liveEvent
+        ? liveEvent.sourceUrls?.length ? liveEvent.sourceUrls : liveEvent.sourceUrl ? [liveEvent.sourceUrl] : []
+        : parseUrls(params.sourceUrls, params.sourceUrl),
+      latitude: liveEvent?.latitude ?? finiteNumber(params.latitude),
+      longitude: liveEvent?.longitude ?? finiteNumber(params.longitude),
+      interestedCount: liveEvent?.interested ?? 0,
+    };
+  }, [liveEvent, params]);
+
+  const categoryConfig = event?.category ? CATEGORIES[event.category] : undefined;
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
@@ -60,27 +96,19 @@ export default function EventDetailScreen() {
   }, [id]);
 
   useEffect(() => {
-    getHiddenContent().then(setHiddenMap);
-  }, []);
+    if (!id) return;
+    const unsubscribe = subscribeToEvent(id, setLiveEvent);
+    return () => unsubscribe();
+  }, [id]);
 
-  const formatTime = (date: Date) => {
-    const now = new Date();
-    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-    const tomorrow = new Date(today.getTime() + 86400000);
-    const eventDay = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+  useEffect(() => {
+    getHiddenContent().then(setHiddenMap).catch(() => {});
+    if (id) getInterestedEvents().then((all) => setInterested(!!all[id])).catch(() => {});
+  }, [id]);
 
-    const h = date.getHours();
-    const hour = h % 12 || 12;
-    const ampm = h < 12 ? 'AM' : 'PM';
-    const min = date.getMinutes().toString().padStart(2, '0');
-    const time = `${hour}:${min} ${ampm}`;
-
-    if (eventDay.getTime() === today.getTime()) return `Today, ${time}`;
-    if (eventDay.getTime() === tomorrow.getTime()) return `Tomorrow, ${time}`;
-
-    const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-    return `${months[date.getMonth()]} ${date.getDate()}, ${time}`;
-  };
+  const timeRange = event ? formatEventRange(event.startMs, event.endMs, currentTime) : '';
+  const status = event ? eventStatus(event.startMs, event.endMs, currentTime) : '';
+  const isUpcoming = !!event && event.startMs > currentTime;
 
   const handleSendComment = async () => {
     if (!user || !commentText.trim() || !id) return;
@@ -102,8 +130,8 @@ export default function EventDetailScreen() {
   };
 
   const handleDelete = () => {
-    if (!id) return;
-    Alert.alert('Delete Event', `Delete "${title}"?`, [
+    if (!id || !event) return;
+    Alert.alert('Delete Event', `Delete "${event.title}"?`, [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete', style: 'destructive', onPress: async () => {
@@ -115,21 +143,50 @@ export default function EventDetailScreen() {
   };
 
   const handleShare = useCallback(async () => {
+    if (!event) return;
     const emoji = categoryConfig?.emoji || '';
-    const timeStr = `${formatTime(start)} — ${formatTime(end)}`;
-    const locationLine = location ? `\n${location}` : '';
-    const urlLine = urls.length > 0 ? `\n${urls[0]}` : '';
+    const locationLine = event.location ? `\n${event.location}` : '';
+    const urlLine = event.urls.length > 0 ? `\n${event.urls[0]}` : '';
 
-    const message = `${emoji} ${title}${locationLine}\n${timeStr}${urlLine}\n\nFound on Pulse - discover what's happening in NYC\nhttps://pulse-3ed92.web.app/`;
+    const message = `${emoji} ${event.title}${locationLine}\n${timeRange}${urlLine}\n\nFound on Pulse - discover what's happening in NYC\nhttps://pulse-3ed92.web.app/`;
 
     try {
       await Share.share(
         Platform.OS === 'ios'
           ? { message }
-          : { message, title: title || 'Check out this event' }
+          : { message, title: event.title || 'Check out this event' }
       );
     } catch {}
-  }, [title, location, start, end, urls, categoryConfig]);
+  }, [event, timeRange, categoryConfig]);
+
+  const handleDirections = useCallback(async () => {
+    if (!event || event.latitude === null || event.longitude === null) return;
+    const destination = `${event.latitude},${event.longitude}`;
+    const web = `https://www.google.com/maps/dir/?api=1&destination=${destination}`;
+    const url = Platform.OS === 'ios'
+      ? `https://maps.apple.com/?daddr=${destination}&q=${encodeURIComponent(event.location || event.title)}`
+      : web;
+    try {
+      await Linking.openURL(url);
+    } catch {
+      Linking.openURL(web).catch(() => {});
+    }
+  }, [event]);
+
+  const handleInterested = useCallback(async () => {
+    if (!id) return;
+    const wasInterested = interested;
+    setInterested(!wasInterested);
+    try {
+      await Promise.all([
+        markInterested(id, wasInterested, user?.uid),
+        setInterestedLocal(id, !wasInterested),
+      ]);
+    } catch (e) {
+      setInterested(wasInterested);
+      console.warn('Interested failed:', e);
+    }
+  }, [id, interested, user]);
 
   const isAdmin = user?.email === ADMIN_EMAIL;
 
@@ -166,42 +223,87 @@ export default function EventDetailScreen() {
     return `${Math.floor(mins / 60)}h`;
   };
 
+  if (!event) {
+    return (
+      <View style={styles.missing}>
+        {liveEvent === undefined ? (
+          <ActivityIndicator size="large" color="#999" accessibilityLabel="Loading event" />
+        ) : (
+          <>
+            <Text style={styles.missingTitle}>This event is no longer listed</Text>
+            <Text style={styles.missingText}>It may have ended or been removed.</Text>
+            <TouchableOpacity style={styles.missingButton} onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} accessibilityRole="button">
+              <Text style={styles.missingButtonText}>Back to the map</Text>
+            </TouchableOpacity>
+          </>
+        )}
+      </View>
+    );
+  }
+
+  const hasPin = event.latitude !== null && event.longitude !== null;
+
   return (
     <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
       <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer}>
         <View style={styles.header}>
-          {isAdmin && urls.length === 0 && (
-            <TouchableOpacity style={styles.deleteButton} onPress={handleDelete}>
+          {isAdmin && event.urls.length === 0 && (
+            <TouchableOpacity style={styles.deleteButton} onPress={handleDelete} accessibilityRole="button" accessibilityLabel="Delete event">
               <Text style={styles.deleteText}>Delete</Text>
             </TouchableOpacity>
           )}
           <Text style={styles.emoji}>{categoryConfig?.emoji}</Text>
-          <Text style={styles.title}>{title}</Text>
+          <Text style={styles.title}>{event.title}</Text>
           <View style={[styles.categoryBadge, { backgroundColor: categoryConfig?.backgroundColor }]}>
             <Text style={[styles.categoryText, { color: categoryConfig?.color }]}>
               {categoryConfig?.label}
             </Text>
           </View>
-          <Text style={styles.timeRange}>
-            {formatTime(start)} — {formatTime(end)}
-          </Text>
-          <TouchableOpacity style={styles.shareButton} onPress={handleShare} activeOpacity={0.7}>
+          <Text style={styles.timeRange}>{timeRange}</Text>
+          <Text style={[styles.status, status === 'Ended' && styles.statusEnded]}>{status}</Text>
+          {event.location ? <Text style={styles.location}>{event.location}</Text> : null}
+          <TouchableOpacity style={styles.shareButton} onPress={handleShare} activeOpacity={0.7} accessibilityRole="button" accessibilityLabel="Share event">
             <Text style={styles.shareButtonIcon}>↗</Text>
           </TouchableOpacity>
+          {(hasPin || isUpcoming) && (
+            <View style={styles.actions}>
+              {hasPin && (
+                <TouchableOpacity style={styles.actionButton} onPress={handleDirections} activeOpacity={0.8} accessibilityRole="button" accessibilityLabel="Get directions">
+                  <Text style={styles.actionButtonText}>Directions</Text>
+                </TouchableOpacity>
+              )}
+              {isUpcoming && (
+                <TouchableOpacity
+                  style={[styles.actionButton, styles.actionButtonSecondary, interested && styles.actionButtonInterested]}
+                  onPress={handleInterested}
+                  activeOpacity={0.8}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Interested, ${event.interestedCount}`}
+                  accessibilityState={{ selected: interested }}
+                  accessibilityHint={user ? 'Sends you a reminder 30 minutes before it starts' : undefined}
+                >
+                  <Text style={[styles.actionButtonSecondaryText, interested && styles.actionButtonInterestedText]}>
+                    {interested ? '⭐' : '☆'} {event.interestedCount > 0 ? `${event.interestedCount} interested` : 'Interested'}
+                  </Text>
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
         </View>
-        {description ? (
+        {event.description ? (
           <View style={styles.descriptionContainer}>
-            <Text style={styles.description}>{description}</Text>
+            <Text style={styles.description}>{event.description}</Text>
           </View>
         ) : null}
-        {urls.length > 0 ? (
+        {event.urls.length > 0 ? (
           <View style={styles.sourceLinks}>
-            {urls.map((url, i) => (
+            {event.urls.map((url, i) => (
               <TouchableOpacity
                 key={i}
                 style={styles.sourceLink}
                 onPress={() => Linking.openURL(url)}
                 activeOpacity={0.7}
+                accessibilityRole="link"
               >
                 <Text style={styles.sourceLinkText}>
                   {(() => {
@@ -237,7 +339,7 @@ export default function EventDetailScreen() {
               <View style={styles.commentActions}>
                 <Text style={styles.commentTime}>{timeAgo(c.createdAt.toMillis())}</Text>
                 {(!user || c.userId !== user.uid) && (
-                  <TouchableOpacity onPress={() => handleFlagComment(c)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <TouchableOpacity onPress={() => handleFlagComment(c)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }} accessibilityRole="button" accessibilityLabel="Report comment">
                     <Text style={styles.flagIcon}>⚑</Text>
                   </TouchableOpacity>
                 )}
@@ -262,11 +364,14 @@ export default function EventDetailScreen() {
             maxLength={280}
             returnKeyType="send"
             onSubmitEditing={handleSendComment}
+            accessibilityLabel="Add a comment"
           />
           <TouchableOpacity
             style={[styles.sendButton, (!commentText.trim() || submitting) && { opacity: 0.4 }]}
             onPress={handleSendComment}
             disabled={!commentText.trim() || submitting}
+            accessibilityRole="button"
+            accessibilityLabel="Send comment"
           >
             <Text style={styles.sendButtonText}>↑</Text>
           </TouchableOpacity>
@@ -276,6 +381,7 @@ export default function EventDetailScreen() {
           style={styles.signInBar}
           onPress={() => router.push('/sign-in')}
           activeOpacity={0.8}
+          accessibilityRole="button"
         >
           <Text style={styles.signInBarText}>Sign in to comment</Text>
         </TouchableOpacity>
@@ -335,6 +441,84 @@ const styles = StyleSheet.create({
   timeRange: {
     fontSize: 15,
     color: '#666',
+  },
+  status: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#2a7cff',
+    marginTop: 4,
+  },
+  statusEnded: {
+    color: '#999',
+  },
+  location: {
+    fontSize: 14,
+    color: '#666',
+    textAlign: 'center',
+    marginTop: 6,
+  },
+  actions: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 10,
+    marginTop: 16,
+  },
+  actionButton: {
+    borderRadius: 20,
+    paddingVertical: 9,
+    paddingHorizontal: 18,
+    backgroundColor: '#1a1a1a',
+  },
+  actionButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
+  },
+  actionButtonSecondary: {
+    backgroundColor: '#f0f0f0',
+  },
+  actionButtonSecondaryText: {
+    color: '#444',
+    fontSize: 14,
+    fontWeight: '600',
+  },
+  actionButtonInterested: {
+    backgroundColor: '#fff3cd',
+  },
+  actionButtonInterestedText: {
+    color: '#b8860b',
+  },
+  missing: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+    backgroundColor: '#fff',
+    gap: 10,
+  },
+  missingTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: '#1a1a1a',
+    textAlign: 'center',
+  },
+  missingText: {
+    fontSize: 15,
+    color: '#666',
+    textAlign: 'center',
+  },
+  missingButton: {
+    marginTop: 8,
+    borderRadius: 12,
+    paddingVertical: 10,
+    paddingHorizontal: 18,
+    backgroundColor: '#1a1a1a',
+  },
+  missingButtonText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '700',
   },
   shareButton: {
     position: 'absolute',
