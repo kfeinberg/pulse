@@ -72,6 +72,17 @@ export default {
         },
       ],
       "./plugins/with-react-native-maps-google",
+      // Builds use Xcode 27 (iOS 27 SDK, required for App Store uploads from
+      // April 2027). On SDK 57 the app must adopt the UIKit scene lifecycle to
+      // launch on iOS 27; SDK 58+ does this by default, so drop it then.
+      [
+        "expo-build-properties",
+        {
+          ios: {
+            enableSceneSupport: true,
+          },
+        },
+      ],
     ],
     experiments: {
       typedRoutes: true,
