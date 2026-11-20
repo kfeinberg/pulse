@@ -4,6 +4,7 @@ import { ScrapedEvent } from "../scrapers/base.js";
 import { type ResolvedLocation, isNycForFreeEventUrl, isWithinNycViewbox } from "./geocoder.js";
 import { resolvedLocationViolations } from "./pipeline/contracts.js";
 import { isUsableEventUrl } from "./eventUrl.js";
+import { forcedToolInput } from "./llmTools.js";
 import { addDays, etDateParts, etTimestamp } from "./etTime.js";
 
 export function nycDayBounds(timestamp: number): { start: number; end: number } {
@@ -134,43 +135,59 @@ async function updateSourceUrl(
   return true;
 }
 
-async function findFuzzyDuplicate(
-  event: ScrapedEvent,
-  startDate: Date,
-  candidates: Array<{ id: string; title: string; location: string; startTime: Timestamp }>,
-  apiKey: string
-): Promise<string | null> {
-  if (candidates.length === 0) return null;
+export type DuplicateCandidate = { id: string; title: string; location: string; startTime: Timestamp };
 
-  // Keep a single provider call below the 300s write-task deadline. Retry
-  // at the queue boundary, not inside an SDK whose timeout outlives the task.
-  const client = new Anthropic({ apiKey, timeout: 60_000, maxRetries: 0 });
-
+export function duplicatePrompt(event: ScrapedEvent, startDate: Date, candidates: DuplicateCandidate[]): string {
   const candidateList = candidates
     .map((c, i) => `${i}: "${c.title}" at "${c.location}" on ${c.startTime.toDate().toISOString()}`)
     .join("\n");
-
-  const message = await client.messages.create({
-    model: "claude-haiku-4-5-20251001",
-    max_tokens: 64,
-    messages: [
-      {
-        role: "user",
-        content: `Is this new event the same real-world event as any of the existing events below? Events from different sources often have slightly different titles or locations but refer to the same thing (e.g. "Smorgasburg Williamsburg" and "Smorgasburg WTC" are DIFFERENT events, but "Smorgasburg World Trade Center" and "Smorgasburg WTC" are the SAME).
+  return `Is this new event the same real-world event as any of the existing events below? Events from different sources often have slightly different titles or locations but refer to the same thing (e.g. "Smorgasburg Williamsburg" and "Smorgasburg WTC" are DIFFERENT events, but "Smorgasburg World Trade Center" and "Smorgasburg WTC" are the SAME).
 
 New event: "${event.title}" at "${event.location}" on ${startDate.toISOString()}
 
 Existing events:
 ${candidateList}
 
-If one is the same event, respond with ONLY the number (e.g. "0"). If none match, respond with "none".`,
+Report your answer with the report_duplicate tool: the number of the existing event that is the same event (e.g. "0"), or "none" if none match.`;
+}
+
+// The answer comes back as a forced tool call whose only allowed values are
+// "none" and the candidate numbers, so prose ("None.", "0 - same venue") can
+// no longer dead-letter a write. parseDuplicateResponse still validates it
+// exactly as strictly as before.
+export async function findFuzzyDuplicate(
+  event: ScrapedEvent,
+  startDate: Date,
+  candidates: DuplicateCandidate[],
+  apiKey: string,
+  options: { client?: Pick<Anthropic, "messages"> } = {}
+): Promise<string | null> {
+  if (candidates.length === 0) return null;
+
+  // Keep a single provider call below the 300s write-task deadline. Retry
+  // at the queue boundary, not inside an SDK whose timeout outlives the task.
+  const client = options.client ?? new Anthropic({ apiKey, timeout: 60_000, maxRetries: 0 });
+  const input = await forcedToolInput(client, {
+    model: "claude-haiku-4-5-20251001",
+    maxTokens: 128,
+    prompt: duplicatePrompt(event, startDate, candidates),
+    tool: {
+      name: "report_duplicate",
+      description: "Report which existing event, if any, is the same real-world event as the new event.",
+      schema: {
+        properties: {
+          match: {
+            type: "string",
+            enum: ["none", ...candidates.map((_, index) => String(index))],
+            description: "The number of the matching existing event, or \"none\".",
+          },
+        },
+        required: ["match"],
       },
-    ],
+    },
   });
 
-  const text = message.content[0].type === "text" ? message.content[0].text.trim() : "";
-
-  const index = parseDuplicateResponse(text, candidates.length);
+  const index = parseDuplicateResponse(typeof input.match === "string" ? input.match : "", candidates.length);
   return index === null ? null : candidates[index].id;
 }
 

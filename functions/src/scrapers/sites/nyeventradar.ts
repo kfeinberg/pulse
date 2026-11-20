@@ -1,6 +1,8 @@
 import { EventSource, ScrapedEvent } from "../base.js";
-import type { ExtractionCache } from "../../services/extractionCache.js";
+import { itemKey, type ExtractionCache } from "../../services/extractionCache.js";
 import { parseNewItems } from "../../services/parser.js";
+
+type ExtractItems = NonNullable<NonNullable<Parameters<typeof parseNewItems>[5]>["extract"]>;
 import { resolveEventbriteUrl } from "../../services/eventUrl.js";
 
 const BASE_URL = "https://ny-event-radar.com/";
@@ -25,18 +27,23 @@ interface NerEvent {
   published?: boolean;
 }
 
-function getDateString(daysFromNow: number): string {
-  const d = new Date();
-  d.setDate(d.getDate() + daysFromNow);
-  return d.toISOString().split("T")[0];
+// The calendar window is in New York time: after 7pm ET the UTC date is
+// already tomorrow, which would drop the rest of tonight's events.
+export function getDateString(daysFromNow: number, nowMs = Date.now()): string {
+  return new Date(nowMs + daysFromNow * 24 * 60 * 60 * 1000).toLocaleDateString("en-CA", { timeZone: "America/New_York" });
 }
 
-export function createNYEventRadarScraper(apiKey: string): EventSource {
+export function createNYEventRadarScraper(
+  apiKey: string,
+  dependencies: { fetch?: typeof fetch; extract?: ExtractItems; now?: () => number } = {}
+): EventSource {
+  const request = dependencies.fetch ?? fetch;
   return {
     name: "nyeventradar",
     async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
-      const today = getDateString(0);
-      const threeDaysOut = getDateString(3);
+      const nowMs = (dependencies.now ?? Date.now)();
+      const today = getDateString(0, nowMs);
+      const threeDaysOut = getDateString(3, nowMs);
 
       // Query Supabase REST API for events starting in the next 3 days
       const queryParams = new URLSearchParams({
@@ -50,7 +57,8 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
       const apiUrl = `${SUPABASE_URL}/rest/v1/events?${queryParams.toString()}`;
       console.log(`Fetching NY Event Radar via Supabase API`);
 
-      const response = await fetch(apiUrl, {
+      const response = await request(apiUrl, {
+        signal: AbortSignal.timeout(30_000),
         headers: {
           apikey: SUPABASE_ANON_KEY,
           Authorization: `Bearer ${SUPABASE_ANON_KEY}`,
@@ -74,9 +82,20 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
       // NY Event Radar occasionally stores Eventbrite category pages or event
       // slugs without the required numeric ticket ID. Resolve those to a
       // canonical event-detail URL before they reach the extraction pipeline.
+      // Eventbrite's search refuses datacenter requests at times (HTTP 405):
+      // that costs this one event its deep link, never the whole source. The
+      // event is published without the unusable link and extracted again on
+      // the next run, when the lookup may succeed.
+      const unresolvedLinks = new Set<NerEvent>();
       for (const event of events) {
         if (!event.url) continue;
-        event.url = (await resolveEventbriteUrl(event.title, event.url)) || undefined;
+        try {
+          event.url = (await resolveEventbriteUrl(event.title, event.url, { fetch: request })) || undefined;
+        } catch (error) {
+          cache.recordFailure(String(error));
+          event.url = undefined;
+          unresolvedLinks.add(event);
+        }
       }
 
       // Format for Claude to categorize
@@ -110,13 +129,16 @@ export function createNYEventRadarScraper(apiKey: string): EventSource {
         eventToText,
         cache,
         BASE_URL,
-        apiKey
+        apiKey,
+        { extract: dependencies.extract }
       );
       console.log(`NY Event Radar: Claude extracted ${parsedEvents.length} events`);
+      cache.unstage(sentEvents.filter((event) => unresolvedLinks.has(event)).map((event) => itemKey(cache.sourceName, eventToText(event))));
 
-      // Map individual event URLs back
+      // Map individual event URLs back. The URL the model copied from the
+      // item is exact; a title prefix is only the fallback.
       for (const parsed of parsedEvents) {
-        const match = sentEvents.find(
+        const match = sentEvents.find((e) => e.url && e.url === parsed.sourceUrl) ?? sentEvents.find(
           (e) =>
             e.title &&
             parsed.title

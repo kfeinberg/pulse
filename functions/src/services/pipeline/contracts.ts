@@ -1,7 +1,9 @@
 import { EVENT_CATEGORIES, type ScrapedEvent } from "../../scrapers/base.js";
 import {
-  isNycForFreeEventUrl,
+  isOutsideNyc,
+  isSourcePinProvider,
   isSpecificSourceAddress,
+  isTrustedSourceUrl,
   isWithinNycViewbox,
   type ResolvedLocation,
 } from "../geocoder.js";
@@ -79,10 +81,11 @@ export function resolvedLocationViolations(value: unknown): string[] {
   if (!isNonEmptyString(geo.formattedAddress)) violations.push("formattedAddress is missing");
   if (!(geo.placeName === null || isNonEmptyString(geo.placeName))) violations.push("placeName is invalid");
   if (!isNonEmptyString(geo.query)) violations.push("query is missing");
-  if (geo.provider === "nycforfree") {
+  if (isSourcePinProvider(geo.provider)) {
     if (!isWithinNycViewbox(geo.latitude, geo.longitude)) violations.push("source coordinates are outside NYC");
     if (!isSpecificSourceAddress(geo.formattedAddress)) violations.push("source address is not specific");
-    if (!isNycForFreeEventUrl(geo.query)) violations.push("source query is not a trusted event URL");
+    else if (isOutsideNyc(geo.formattedAddress)) violations.push("source address is outside NYC");
+    if (!isTrustedSourceUrl(geo.provider, geo.query)) violations.push("source query is not a trusted event URL");
     if (geo.osmId !== null) violations.push("source osmId must be null");
     if (geo.osmType !== null) violations.push("source osmType must be null");
   } else {

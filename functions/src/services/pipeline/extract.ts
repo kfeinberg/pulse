@@ -18,6 +18,9 @@ export interface SourceRunSummary {
   held: number;
   health: SourceHealth;
   samples?: Array<Pick<ScrapedEvent, "title" | "location" | "sourceUrl">>;
+  // Item-level problems isolated during the scrape (present only when any).
+  failed?: number;
+  failureSamples?: string[];
 }
 async function inBatches<T>(items: T[], size: number, fn: (item: T) => Promise<void>): Promise<void> {
   for (let i = 0; i < items.length; i += size) await Promise.all(items.slice(i, i + size).map(fn));
@@ -54,12 +57,14 @@ export async function checkpointExtracted(
   await inBatches(events.map((event, i) => ({ event, id: ids[i] })), 20, ({ event, id }) =>
     deps.store.put("items", { id, source, runId, createdAtMs, held: health.tripped, data: { event } })
   );
+  const failures = cache.failureReasons;
   const checkpoint = await deps.store.saveExtractRun(runId, source, {
     itemIds: ids, cacheKeys: cache.stagedKeys, breaker: options.breaker,
     summary: {
       source, listed, extracted: events.length, skippedByCache: cache.skipped,
       queued: health.tripped ? 0 : ids.length, held: health.tripped ? ids.length : 0, health,
       samples: events.slice(0, 5).map(({ title, location, sourceUrl }) => ({ title, location, sourceUrl })),
+      ...(failures.length ? { failed: failures.length, failureSamples: failures.slice(0, 5).map((reason) => reason.slice(0, 300)) } : {}),
     },
   });
   return finishExtraction(checkpoint, cache, runId, deps);

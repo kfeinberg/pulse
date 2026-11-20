@@ -27,9 +27,9 @@ interface SubstackPost extends SubstackArchivePost {
   body_html?: string;
 }
 
-async function fetchJson<T>(url: string): Promise<T | null> {
+async function fetchJson<T>(url: string, request: typeof fetch): Promise<T | null> {
   console.log(`Fetching: ${url}`);
-  const response = await fetch(url, { headers: FETCH_HEADERS });
+  const response = await request(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(20_000) });
   if (!response.ok) {
     const body = await response.text();
     console.error(`Failed to fetch ${url}: ${response.status}, body: ${body.slice(0, 500)}`);
@@ -38,7 +38,21 @@ async function fetchJson<T>(url: string): Promise<T | null> {
   return (await response.json()) as T;
 }
 
-export function createFieldnotesScraper(apiKey: string): EventSource {
+// Substack's archive API used to return a bare array and accept offset=0. It
+// now rejects any offset (HTTP 400) and wraps the list as { posts, nextCursor }.
+export function archiveUrl(): string {
+  return `${BASE_URL}api/v1/archive?sort=new&search=&limit=${POSTS_TO_FETCH}`;
+}
+
+export function archivePosts(payload: unknown): SubstackArchivePost[] | null {
+  const posts = Array.isArray(payload) ? payload : (payload as { posts?: unknown } | null)?.posts;
+  return Array.isArray(posts) ? (posts as SubstackArchivePost[]) : null;
+}
+
+type ExtractItems = NonNullable<NonNullable<Parameters<typeof parseNewItems>[5]>["extract"]>;
+
+export function createFieldnotesScraper(apiKey: string, dependencies: { fetch?: typeof fetch; extract?: ExtractItems } = {}): EventSource {
+  const request = dependencies.fetch ?? fetch;
   return {
     name: "fieldnotes",
     async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
@@ -47,11 +61,11 @@ export function createFieldnotesScraper(apiKey: string): EventSource {
       // for its full body_html. Paid posts return only their public free
       // preview here — that is not circumvented, whatever events are in
       // the preview are simply extracted like any other post.
-      const archive = await fetchJson<SubstackArchivePost[]>(
-        `${BASE_URL}api/v1/archive?sort=new&search=&offset=0&limit=${POSTS_TO_FETCH}`
-      );
+      // A failed or unrecognized archive is an error, not a quiet zero: a
+      // source that has always listed zero cannot trip the circuit breaker.
+      const archive = archivePosts(await fetchJson<unknown>(archiveUrl(), request));
       if (!archive) {
-        return [];
+        throw new Error("Fieldnotes archive request failed or returned no post list");
       }
 
       const posts = archive.filter((post) => post.slug);
@@ -61,7 +75,8 @@ export function createFieldnotesScraper(apiKey: string): EventSource {
 
       for (const entry of posts) {
         const post = await fetchJson<SubstackPost>(
-          `${BASE_URL}api/v1/posts/${encodeURIComponent(entry.slug!)}`
+          `${BASE_URL}api/v1/posts/${encodeURIComponent(entry.slug!)}`,
+          request
         );
         if (!post?.body_html) {
           console.warn(`No body found for Fieldnotes post: ${entry.slug}`);
@@ -96,7 +111,8 @@ export function createFieldnotesScraper(apiKey: string): EventSource {
           (text) => text,
           cache,
           postUrl,
-          apiKey
+          apiKey,
+          { extract: dependencies.extract }
         );
         console.log(
           `Fieldnotes post "${post.title}": Claude extracted ${parsedEvents.length} events`

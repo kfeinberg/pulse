@@ -36,7 +36,7 @@ interface ResolvedLocationFields {
 
 export type ResolvedLocation = ResolvedLocationFields & (
   | { provider: "nominatim"; osmId: number; osmType: string }
-  | { provider: "nycforfree"; osmId: null; osmType: null }
+  | { provider: SourcePinProvider; osmId: null; osmType: null }
 );
 
 // This is the same bounded area used for Nominatim queries. Source coordinates
@@ -48,16 +48,86 @@ export function isWithinNycViewbox(latitude: unknown, longitude: unknown): boole
     longitude >= -74.2591 && longitude <= -73.7004;
 }
 
-export function isNycForFreeEventUrl(value: unknown): value is string {
+function isHttpsUrlOn(value: unknown, hosts: string[], path: RegExp): value is string {
   if (typeof value !== "string") return false;
   try {
     const url = new URL(value);
     return url.protocol === "https:" && !url.username && !url.password && !url.port &&
-      ["www.nycforfree.co", "nycforfree.co"].includes(url.hostname) &&
-      /^\/events\/[a-z0-9][a-z0-9_-]*\/?$/i.test(url.pathname);
+      hosts.includes(url.hostname) && path.test(url.pathname);
   } catch {
     return false;
   }
+}
+
+export function isNycForFreeEventUrl(value: unknown): value is string {
+  return isHttpsUrlOn(value, ["www.nycforfree.co", "nycforfree.co"], /^\/events\/[a-z0-9][a-z0-9_-]*\/?$/i);
+}
+
+export function isDiceEventUrl(value: unknown): value is string {
+  return isHttpsUrlOn(value, ["dice.fm", "www.dice.fm"], /^\/event\/[a-z0-9][a-z0-9_-]*\/?$/i);
+}
+
+export function isOhMyRocknessShowUrl(value: unknown): value is string {
+  return isHttpsUrlOn(value, ["www.ohmyrockness.com", "ohmyrockness.com"], /^\/shows\/\d+(?:-[a-z0-9-]*)?\/?$/i);
+}
+
+// Publishers whose event pages carry the venue's own coordinates. A pin is
+// trusted only when the scraper attached it from that event's own page.
+export const SOURCE_PIN_PROVIDERS = {
+  nycforfree: isNycForFreeEventUrl,
+  dice: isDiceEventUrl,
+  ohmyrockness: isOhMyRocknessShowUrl,
+} as const;
+export type SourcePinProvider = keyof typeof SOURCE_PIN_PROVIDERS;
+
+export function isSourcePinProvider(value: unknown): value is SourcePinProvider {
+  return typeof value === "string" && Object.prototype.hasOwnProperty.call(SOURCE_PIN_PROVIDERS, value);
+}
+
+export function isTrustedSourceUrl(provider: SourcePinProvider, value: unknown): value is string {
+  return SOURCE_PIN_PROVIDERS[provider](value);
+}
+
+// The viewbox is a rectangle that also covers Jersey City, Hoboken, Newark
+// and the Palisades. Points west of the Hudson (north of the Battery) or of
+// the Upper Bay (north of Staten Island's Kill Van Kull) are New Jersey.
+const HUDSON: Array<[number, number]> = [
+  [40.700, -74.025], [40.730, -74.018], [40.760, -74.008], [40.790, -73.985],
+  [40.820, -73.965], [40.850, -73.950], [40.880, -73.930], [40.918, -73.915],
+];
+export function isWestOfHudson(latitude: number, longitude: number): boolean {
+  if (latitude >= HUDSON[0][0]) {
+    for (let i = 1; i < HUDSON.length; i++) {
+      const [lat1, lon1] = HUDSON[i - 1];
+      const [lat2, lon2] = HUDSON[i];
+      if (latitude <= lat2 || i === HUDSON.length - 1) {
+        const t = Math.min(1, Math.max(0, (latitude - lat1) / (lat2 - lat1)));
+        return longitude < lon1 + t * (lon2 - lon1);
+      }
+    }
+  }
+  return latitude >= 40.648 && longitude < -74.045;
+}
+
+export function isWithinNyc(latitude: unknown, longitude: unknown): boolean {
+  return isWithinNycViewbox(latitude, longitude) && !isWestOfHudson(latitude as number, longitude as number);
+}
+
+// Listings sometimes fill an unknown venue with the city's geocoding centroid.
+export function isNycCentroid(latitude: number, longitude: number): boolean {
+  return Math.abs(latitude - 40.7127753) < 0.0001 && Math.abs(longitude + 74.0059728) < 0.0001;
+}
+
+// The NYC viewbox also covers Jersey City, Hoboken and Newark, so a pin inside
+// it is not proof of an NYC venue. An address that names another state, or
+// whose ZIP is outside NYC's (Yonkers 107xx, Long Island 115xx, NJ 07xxx), is
+// not on this map. "110" also covers some Nassau towns and is allowed.
+const NYC_ZIP_PREFIXES = new Set(["100", "101", "102", "103", "104", "110", "111", "112", "113", "114", "116"]);
+export function isOutsideNyc(location: string): boolean {
+  // State abbreviations only in capitals, so "Ct" (court) or "Pa" never match.
+  if (/,\s*(?:NJ|N\.J\.|CT|PA)\b|\b(?:NJ|CT|PA)\s+\d{5}\b/.test(location) || /\b(?:New Jersey|Connecticut|Pennsylvania)\b/i.test(location)) return true;
+  const zips = [...location.matchAll(/\b(\d{5})(?:-\d{4})?\s*(?=,|$)/g)].map((match) => match[1]);
+  return zips.length > 0 && zips.every((zip) => !NYC_ZIP_PREFIXES.has(zip.slice(0, 3)));
 }
 
 export function isSpecificSourceAddress(value: unknown): value is string {
@@ -88,11 +158,13 @@ function sourceLocation(event: ScrapedEvent): ResolvedLocation | null {
   // Only scraper-attached provenance is trusted. Bare model-extracted
   // latitude/longitude fields are deliberately never used as a fast path.
   const pin = event.sourceLocation;
-  if (!pin || typeof pin !== "object" || event.sourceName !== "nycforfree" ||
-      !isNycForFreeEventUrl(event.sourceUrl) || pin.sourceUrl !== event.sourceUrl ||
+  const provider = event.sourceName;
+  if (!pin || typeof pin !== "object" || !isSourcePinProvider(provider) ||
+      !isTrustedSourceUrl(provider, event.sourceUrl) || pin.sourceUrl !== event.sourceUrl ||
       !isSpecificSourceAddress(pin.address) || !isSpecificSourceAddress(event.location) ||
       !sourceAddressMatches(pin.address, event.location) ||
-      !isWithinNycViewbox(pin.latitude, pin.longitude)) return null;
+      !isWithinNyc(pin.latitude, pin.longitude) || isNycCentroid(pin.latitude, pin.longitude) ||
+      isOutsideNyc(pin.address) || isOutsideNyc(event.location)) return null;
   if (pin.placeName !== undefined && (typeof pin.placeName !== "string" || !pin.placeName.trim())) return null;
   return {
     latitude: pin.latitude,
@@ -100,7 +172,7 @@ function sourceLocation(event: ScrapedEvent): ResolvedLocation | null {
     formattedAddress: pin.address.trim(),
     placeName: pin.placeName?.trim() ?? null,
     query: pin.sourceUrl,
-    provider: "nycforfree",
+    provider,
     osmId: null,
     osmType: null,
   };
@@ -228,22 +300,126 @@ export function segmentQueries(location: string): {
   return none;
 }
 
-function buildQueries(event: ScrapedEvent): string[] {
-  const location = normalizeStreetDirections(event.location).replace(/\s+/g, " ").trim();
-  const { placeName, address } = parseLocation(location);
+const COUNTRY_PART = /^(?:usa|u\.s\.a\.?|u\.s\.|us|united states(?: of america)?)$/i;
+// Whole location parts that only describe a unit inside a building, or that
+// are stray clock times ("00:00, 21-38 44th Rd"). Nominatim cannot use them.
+const UNIT_PART = /^(?:(?:\d{1,3}(?:st|nd|rd|th)|first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|ground|top|main|lower|upper)\s+(?:floor|fl\.?)|(?:floor|fl\.?)\s*\d{1,3}|(?:suite|ste\.?|unit|apt\.?|apartment|room|rm\.?)\s*#?\s*[\w-]+(?:\s*\([^)]*\))?|#\s*[\w-]+|(?:[\w'’.]+\s+){0,3}hearing room(?:\s*\d+)?|\d{1,2}:\d{2}(?:\s*[ap]\.?m\.?)?)$/i;
+// A unit written inside the street part: "199 Cook Street Suite 203".
+const INLINE_UNIT = /\s+(?:suite|ste\.?|unit|apt\.?|apartment|room|rm\.?)\s*#?\s*[\w-]+|\s+#\s*[\w-]+/gi;
+const STATE_TAIL = /\b(?:NY|New York)(?:\s+\d{5}(?:-\d{4})?)?\s*$/i;
+const HOUSE_NUMBER = /^\d{1,6}(?:-\d{1,6})?[a-z]?\b/i;
+
+const partKey = (part: string) => part.toLowerCase().replace(/['’]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+const containsWords = (haystack: string, needle: string) => ` ${partKey(haystack)} `.includes(` ${partKey(needle)} `);
+
+// Removes what makes Nominatim return nothing for an otherwise exact address:
+// unit/floor/room designators, a trailing country, repeated parts and stray
+// clock times. The named place and the street address are kept as written.
+// After the street, a locality fragment that an earlier part already states
+// is dropped too ("Brooklyn NY 11206, Brooklyn, NY 11206").
+export function cleanLocation(location: string): string {
+  const kept: string[] = [];
+  let streetSeen = false;
+  let tail: string[] = [];
+  for (const raw of normalizeStreetDirections(location).replace(/\s+/g, " ").split(",")) {
+    const trimmed = raw.trim();
+    if (!trimmed || COUNTRY_PART.test(trimmed) || UNIT_PART.test(trimmed)) continue;
+    const isStreet = HOUSE_NUMBER.test(trimmed);
+    const part = isStreet ? trimmed.replace(INLINE_UNIT, "").trim() : trimmed;
+    if (!partKey(part) || kept.some((previous) => partKey(previous) === partKey(part))) continue;
+    if (streetSeen && !isStreet && tail.some((previous) => containsWords(previous, part))) continue;
+    if (isStreet) {
+      streetSeen = true;
+      tail = [];
+    } else if (streetSeen) {
+      tail.push(part);
+    }
+    kept.push(part);
+  }
+  return kept.join(", ");
+}
+
+// "629 West 51st St, New York, NY 10019, USA" fails once ", New York, NY" is
+// appended again; only add the city when no state is present.
+function withCity(query: string): string {
+  return STATE_TAIL.test(query) ? query : `${query}, New York, NY`;
+}
+
+// The street part and the locality after it, without locality fragments that
+// an earlier part already states ("Brooklyn NY 11206, Brooklyn, NY 11206").
+function streetAddress(parts: string[], streetIndex: number): string {
+  const tail: string[] = [];
+  for (const part of parts.slice(streetIndex + 1)) {
+    if (HOUSE_NUMBER.test(part) || tail.some((previous) => containsWords(previous, part))) continue;
+    tail.push(part);
+  }
+  return [parts[streetIndex], ...tail].join(", ");
+}
+
+const NAME_STOPWORDS = new Set(["the", "of", "and", "at", "in", "on", "nyc", "new", "york", "ny"]);
+const nameWords = (value: string) => partKey(value).split(" ").filter((word) => word && !NAME_STOPWORDS.has(word));
+
+// Last-resort lookups by the bare place name, which Nominatim matches far
+// better than "Name, Neighborhood, Borough": "Frick Collection" rather than
+// "The Frick Collection, Upper East Side", "David Rubenstein Atrium" rather
+// than "Lincoln Center's David Rubenstein Atrium". One-word names are too
+// ambiguous to look up without an address.
+export function placeNameVariants(placeName: string): string[] {
+  const first = placeName.split(",")[0].trim();
+  const strip = (value: string) => value.replace(/^the\s+/i, "").trim();
+  const distinctive = (value: string, minWords: number) =>
+    nameWords(value).length >= minWords || (/\d/.test(value) && nameWords(value).length >= 1);
+  const variants: string[] = [];
+  if (distinctive(strip(first), 2)) variants.push(strip(first));
+  // "X's Y": Y alone must still be specific ("Rudy's Bar & Grill" is not).
+  const possessive = /^[^'’]{2,60}['’]s\s+(.+)$/.exec(first)?.[1];
+  if (possessive && distinctive(strip(possessive), 3)) variants.push(strip(possessive));
+  const head = first.split(/\s*:\s*|\s+[-–—|]\s+/)[0];
+  if (head && head !== first && distinctive(strip(head), 2)) variants.push(strip(head));
+  return [...new Set(variants)].filter((variant) => !isGenericNycLocation(variant)).slice(0, 2);
+}
+
+// A bare-name result must actually carry every distinctive word of the name.
+function nameMatches(result: NominatimResult, requested: string): boolean {
+  const resultWords = new Set(nameWords(result.name || ""));
+  const words = nameWords(requested);
+  return words.length > 0 && words.every((word) => resultWords.has(word));
+}
+
+interface GeocodeQuery {
+  q: string;
+  // Only results whose name matches this place are acceptable.
+  requireName?: string;
+}
+
+function buildQueries(event: ScrapedEvent): GeocodeQuery[] {
+  const location = cleanLocation(event.location) || normalizeStreetDirections(event.location).replace(/\s+/g, " ").trim();
+  const parts = location.split(",").map((part) => part.trim()).filter(Boolean);
+  const { placeName } = parseLocation(location);
+  const streetIndex = parts.findIndex((part) => HOUSE_NUMBER.test(part));
+  const address = streetIndex >= 0 ? streetAddress(parts, streetIndex) : null;
   const sourceHint = getSourceHint(event.sourceUrl);
   const { junctionQueries, streetOnlyQuery } = segmentQueries(location);
-  const queries = [
-    ...junctionQueries,
-    sourceHint ? `${location}, ${sourceHint}, NY` : null,
-    `${location}, New York, NY`,
-    placeName && sourceHint ? `${placeName}, ${sourceHint}, NY` : null,
-    placeName ? `${placeName}, New York, NY` : null,
-    address ? `${address}, New York, NY` : null,
-    streetOnlyQuery,
-  ].filter((query): query is string => Boolean(query));
-
-  return [...new Set(queries.map((query) => query.replace(/\s+/g, " ").trim()))];
+  const queries: Array<GeocodeQuery | null> = [
+    ...junctionQueries.map((q) => ({ q })),
+    sourceHint ? { q: `${location}, ${sourceHint}, NY` } : null,
+    { q: withCity(location) },
+    // An exact street address outranks a lookup by the venue's name alone,
+    // which can return a same-named place elsewhere in the city.
+    address ? { q: withCity(address) } : null,
+    placeName && sourceHint ? { q: `${placeName}, ${sourceHint}, NY` } : null,
+    placeName ? { q: `${placeName}, New York, NY` } : null,
+    ...(!address && placeName ? placeNameVariants(placeName).map((variant) => ({ q: variant, requireName: variant })) : []),
+    streetOnlyQuery ? { q: streetOnlyQuery } : null,
+  ];
+  const seen = new Set<string>();
+  return queries.filter((query): query is GeocodeQuery => {
+    if (!query) return false;
+    query.q = query.q.replace(/\s+/g, " ").trim();
+    if (seen.has(query.q)) return false;
+    seen.add(query.q);
+    return true;
+  });
 }
 
 function scoreResult(
@@ -378,6 +554,10 @@ export async function resolveEventLocation(
   deps: GeocoderDeps = {}
 ): Promise<ResolvedLocation | null> {
   if (!event.location.trim()) return null;
+  if (isOutsideNyc(event.location)) {
+    console.warn(`Skipped location outside NYC: "${event.location}"`);
+    return null;
+  }
   // A validated, event-specific publisher pin outranks stale OSM cache data
   // and needs neither a cache write nor a Nominatim request reservation.
   const sourcePin = sourceLocation(event);
@@ -392,14 +572,20 @@ export async function resolveEventLocation(
   const cached = await cacheRef.get();
   if (cached.exists) {
     const data = cached.data() as ResolvedLocation;
-    console.log(`Geocoding cache hit for "${event.location}"`);
-    return data;
+    // An older entry may point across the Hudson; look that place up again.
+    if (isWithinNyc(data.latitude, data.longitude)) {
+      console.log(`Geocoding cache hit for "${event.location}"`);
+      return data;
+    }
   }
 
   let lookupError: unknown = null;
-  for (const query of buildQueries(event)) {
+  for (const { q: query, requireName } of buildQueries(event)) {
     try {
-      const results = await search(query, db, deps);
+      // The bounded viewbox reaches into New Jersey; keep New York results only.
+      const found = (await search(query, db, deps)).filter((result) =>
+        (!result.address?.state || result.address.state === "New York") && isWithinNyc(Number(result.lat), Number(result.lon)));
+      const results = requireName ? found.filter((result) => nameMatches(result, requireName)) : found;
       if (results.length === 0) continue;
 
       const ranked = results

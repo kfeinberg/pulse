@@ -1,10 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { EVENT_CATEGORIES, ScrapedEvent } from "../scrapers/base.js";
+import { EVENT_CATEGORIES, type EventCategory, ScrapedEvent } from "../scrapers/base.js";
 import { EXTRACTION_MODEL, EXTRACTION_PROMPT } from "./extractionPrompt.js";
 import type { ExtractionCache, NewItems } from "./extractionCache.js";
 import { addDays, etTimestamp, type DateParts } from "./etTime.js";
 import { resolveEventbriteUrl } from "./eventUrl.js";
+import { forcedToolInput } from "./llmTools.js";
 import { temporalExclusionReason } from "./temporalFilter.js";
+
+// A batch that produced usable events but not a complete, trustworthy result
+// (one malformed candidate, an unresolved venue, a failed link lookup) is
+// reported here. Its events are still delivered, but its source items are not
+// marked as extracted, so the next run extracts them again.
+export interface ExtractionReport {
+  partial(reason: string): void;
+}
 
 
 export function stripHtml(html: string): string {
@@ -140,10 +149,33 @@ export function parseEventTimes(date: string, startTime: string, endTime: string
   return { startTimestamp, endTimestamp };
 }
 
-// Invalid model output is an extraction failure, not a successful empty page.
-// Validate decisions before the temporal filter so malformed candidates cannot
-// be silently excluded and then remembered as successfully extracted.
-export function parseExtractionResponse(text: string): ExtractedEvent[] {
+const EXTRACTED_FIELDS = ["title", "description", "date", "startTime", "endTime", "location", "category", "temporalStatus", "temporalEvidence"];
+
+function validateCandidate(candidate: unknown, index: number): ExtractedEvent {
+  if (!candidate || typeof candidate !== "object") throw new Error(`Invalid extraction item ${index}`);
+  const record = candidate as Record<string, unknown>;
+  for (const field of EXTRACTED_FIELDS) {
+    if (typeof record[field] !== "string") throw new Error(`Extraction item ${index}: ${field} must be a string`);
+  }
+  if (record.url !== undefined && typeof record.url !== "string") throw new Error(`Extraction item ${index}: url must be a string`);
+  if (record.endDate !== undefined && typeof record.endDate !== "string") throw new Error(`Extraction item ${index}: endDate must be a string`);
+  const event = candidate as ExtractedEvent;
+  if (!event.title.trim() || !event.temporalEvidence.trim()) throw new Error(`Extraction item ${index}: missing title or temporal evidence`);
+  if (!["scheduled_event", "limited_run", "permanent_attraction"].includes(event.temporalStatus)) {
+    throw new Error(`Extraction item ${index}: invalid temporalStatus`);
+  }
+  if (!(EVENT_CATEGORIES as readonly string[]).includes(event.category)) throw new Error(`Extraction item ${index}: invalid category`);
+  if (event.temporalStatus !== "permanent_attraction") {
+    if (!event.location.trim()) throw new Error(`Extraction item ${index}: missing location`);
+    if (event.temporalStatus === "limited_run" && !event.endDate?.trim()) {
+      throw new Error(`Extraction item ${index}: limited run is missing its final date`);
+    }
+    parseEventTimes(event.date, event.startTime, event.endTime, event.endDate);
+  }
+  return event;
+}
+
+function parseCandidates(text: string): unknown[] {
   const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
   let value: unknown;
   try {
@@ -152,35 +184,107 @@ export function parseExtractionResponse(text: string): ExtractedEvent[] {
     throw new Error("Failed to parse extraction JSON");
   }
   if (!Array.isArray(value)) throw new Error("Extraction response was not an array");
-  const fields = ["title", "description", "date", "startTime", "endTime", "location", "category", "temporalStatus", "temporalEvidence"];
-  return value.map((candidate: unknown, index) => {
-    if (!candidate || typeof candidate !== "object") throw new Error(`Invalid extraction item ${index}`);
-    const record = candidate as Record<string, unknown>;
-    for (const field of fields) {
-      if (typeof record[field] !== "string") throw new Error(`Extraction item ${index}: ${field} must be a string`);
-    }
-    if (record.url !== undefined && typeof record.url !== "string") throw new Error(`Extraction item ${index}: url must be a string`);
-    if (record.endDate !== undefined && typeof record.endDate !== "string") throw new Error(`Extraction item ${index}: endDate must be a string`);
-    const event = candidate as ExtractedEvent;
-    if (!event.title.trim() || !event.temporalEvidence.trim()) throw new Error(`Extraction item ${index}: missing title or temporal evidence`);
-    if (!["scheduled_event", "limited_run", "permanent_attraction"].includes(event.temporalStatus)) {
-      throw new Error(`Extraction item ${index}: invalid temporalStatus`);
-    }
-    if (!(EVENT_CATEGORIES as readonly string[]).includes(event.category)) throw new Error(`Extraction item ${index}: invalid category`);
-    if (event.temporalStatus !== "permanent_attraction") {
-      if (!event.location.trim()) throw new Error(`Extraction item ${index}: missing location`);
-      if (event.temporalStatus === "limited_run" && !event.endDate?.trim()) {
-        throw new Error(`Extraction item ${index}: limited run is missing its final date`);
+  return value;
+}
+
+// Invalid model output is an extraction failure, not a successful empty page.
+// Validate decisions before the temporal filter so malformed candidates cannot
+// be silently excluded and then remembered as successfully extracted.
+export function parseExtractionResponse(text: string): ExtractedEvent[] {
+  return parseCandidates(text).map(validateCandidate);
+}
+
+const CATEGORY_ALIASES: Record<string, EventCategory> = {
+  "pop up": "popup", "pop ups": "popup", "popups": "popup", "pop up shop": "popup",
+  "free": "free_stuff", "freebie": "free_stuff", "freebies": "free_stuff", "giveaway": "free_stuff", "giveaways": "free_stuff",
+  "bar": "bars", "club": "clubs", "nightclub": "clubs", "nightclubs": "clubs",
+  "concert": "concerts", "live music": "concerts",
+  "farmers markets": "farmers_market", "greenmarket": "farmers_market", "greenmarkets": "farmers_market",
+  "street fairs": "street_fair", "street festival": "street_fair", "block party": "street_fair",
+  "trick or treating": "trick_or_treat", "trick or streets": "trick_or_treat",
+  "happenings": "happening",
+};
+const categoryKey = (value: string) => value.toLowerCase().replace(/['’]/g, "").replace(/[^a-z]+/g, " ").trim();
+const CANONICAL_CATEGORIES = new Map(EVENT_CATEGORIES.map((category) => [categoryKey(category), category]));
+
+// Maps a category label to its canonical value ("Pop-Up" → popup, "farmer's
+// market" → farmers_market), or null when the label is not a known one.
+export function normalizeCategory(value: unknown): EventCategory | null {
+  if (typeof value !== "string") return null;
+  const key = categoryKey(value);
+  return CANONICAL_CATEGORIES.get(key) ?? CATEGORY_ALIASES[key] ?? null;
+}
+
+export interface ExtractionPartition {
+  events: ExtractedEvent[];
+  rejected: string[];
+}
+
+// The batch-level counterpart of parseExtractionResponse. The response must
+// still be a JSON array, and each candidate is validated exactly as strictly,
+// but one malformed candidate is reported instead of discarding its valid
+// siblings. A category label outside the list is a display grouping, not a
+// safety decision, so it falls back to the prompt's catch-all ("happening").
+export function partitionExtractionResponse(text: string): ExtractionPartition {
+  const result: ExtractionPartition = { events: [], rejected: [] };
+  parseCandidates(text).forEach((candidate, index) => {
+    let normalized = candidate;
+    if (candidate && typeof candidate === "object" && !Array.isArray(candidate)) {
+      const record = candidate as Record<string, unknown>;
+      if (typeof record.category === "string" && !(EVENT_CATEGORIES as readonly string[]).includes(record.category)) {
+        const category = normalizeCategory(record.category) ?? "happening";
+        console.log(`Extraction item ${index}: category "${record.category}" → "${category}"`);
+        normalized = { ...record, category };
       }
-      parseEventTimes(event.date, event.startTime, event.endTime, event.endDate);
     }
-    return event;
+    try {
+      result.events.push(validateCandidate(normalized, index));
+    } catch (error) {
+      result.rejected.push(error instanceof Error ? error.message : String(error));
+    }
   });
+  return result;
+}
+
+function readExtraction(text: string): ExtractionPartition | Error {
+  try {
+    return partitionExtractionResponse(text);
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+}
+
+async function lookupVenueLocations(client: Anthropic, event: ExtractedEvent): Promise<string[]> {
+  const input = await forcedToolInput(client, {
+    model: "claude-haiku-4-5-20251001",
+    maxTokens: 2048,
+    prompt: `An event called "${event.title}" is described as being at "${event.location}" in New York City.
+
+Based on your knowledge, what are the specific locations (venue names and addresses) where this takes place in NYC? If this is a brand, business, or chain, list their NYC locations.
+
+Report them with the report_locations tool. Each location must be a specific venue name and street address, for example "Joe's Pizza, 7 Carmine St, New York, NY". If you don't know the specific locations, report an empty list.`,
+    tool: {
+      name: "report_locations",
+      description: "Report the specific NYC venue names and street addresses for the event, or an empty list if they are unknown.",
+      schema: {
+        properties: {
+          locations: { type: "array", items: { type: "string" }, description: "Specific NYC venue names with street addresses." },
+        },
+        required: ["locations"],
+      },
+    },
+  });
+  const locations = input.locations;
+  if (!Array.isArray(locations) || locations.some((loc) => typeof loc !== "string" || !loc.trim())) {
+    throw new Error(`Invalid location response for "${event.title}"`);
+  }
+  return locations as string[];
 }
 
 async function resolveVagueLocations(
   events: ExtractedEvent[],
-  client: Anthropic
+  client: Anthropic,
+  report?: ExtractionReport
 ): Promise<ExtractedEvent[]> {
   const vagueEvents = events.filter((e) => isVagueLocation(e.location));
   if (vagueEvents.length === 0) return events;
@@ -189,66 +293,31 @@ async function resolveVagueLocations(
 
   // Ask Claude to resolve each vague location
   for (const event of vagueEvents) {
+    let locations: string[];
     try {
-      const message = await client.messages.create({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 2048,
-        messages: [
-          {
-            role: "user",
-            content: `An event called "${event.title}" is described as being at "${event.location}" in New York City.
-
-Based on your knowledge, what are the specific locations (venue names and addresses) where this takes place in NYC? If this is a brand, business, or chain, list their NYC locations.
-
-Return ONLY a JSON array of location strings. Each string should be a specific venue name and address. If you don't know the specific locations, return an empty array [].
-
-Example: ["Joe's Pizza, 7 Carmine St, New York, NY", "Joe's Pizza, 150 E 14th St, New York, NY"]`,
-          },
-        ],
-      });
-
-      const text = message.content[0].type === "text" ? message.content[0].text : "";
-      const cleaned = text.replace(/```(?:json)?\s*/gi, "").trim();
-
-      let locations: unknown;
-      try {
-        locations = JSON.parse(cleaned);
-      } catch {
-        throw new Error(`Failed to parse locations for "${event.title}"`);
-      }
-      if (!Array.isArray(locations) || locations.some((loc) => typeof loc !== "string" || !loc.trim())) {
-        throw new Error(`Invalid location response for "${event.title}"`);
-      }
-      if (locations.length === 0) {
-        console.log(`No specific locations found for "${event.title}", skipping`);
-        continue;
-      }
-
-      console.log(`Resolved "${event.title}" to ${locations.length} locations`);
-      for (const loc of locations) {
-        specificEvents.push({ ...event, location: loc as string });
-      }
+      locations = await lookupVenueLocations(client, event);
     } catch (err) {
-      // A failed resolution must not stage the source item as a success.
-      throw new Error(`Location resolution failed for "${event.title}"`, { cause: err });
+      // A failed resolution must not stage the source item as a success. With
+      // a report, only this event is held back; its siblings still publish.
+      if (!report) throw new Error(`Location resolution failed for "${event.title}"`, { cause: err });
+      report.partial(`Location resolution failed for "${event.title}": ${String(err)}`);
+      continue;
+    }
+    if (locations.length === 0) {
+      console.log(`No specific locations found for "${event.title}", skipping`);
+      continue;
+    }
+
+    console.log(`Resolved "${event.title}" to ${locations.length} locations`);
+    for (const loc of locations) {
+      specificEvents.push({ ...event, location: loc });
     }
   }
 
   return specificEvents;
 }
 
-// Failures are thrown so the source run cannot report a healthy empty result.
-export async function extractEvents(
-  content: string,
-  sourceName: string,
-  sourceUrl: string,
-  apiKey: string,
-  options: { client?: Anthropic } = {}
-): Promise<ScrapedEvent[]> {
-  if (content.length > MAX_EXTRACTION_CONTENT_CHARS) throw new Error("Extraction content exceeds the input limit");
-  const client = options.client ?? new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
-  console.log(`Content sent: ${content.length} chars`);
-
+async function requestExtraction(client: Anthropic, content: string): Promise<string> {
   let message;
   try {
     // Receive long JSON outputs incrementally so proxies do not close an idle
@@ -276,7 +345,40 @@ export async function extractEvents(
 
   if (message.stop_reason === "max_tokens") throw new Error("Extraction response exceeded the output limit");
   if (!message.stop_reason) throw new Error("Extraction stream ended before completion");
-  const parsed = parseExtractionResponse(text);
+  return text;
+}
+
+// Failures are thrown so the source run cannot report a healthy empty result.
+// Model output is nondeterministic, so a malformed response gets one fresh
+// attempt. A candidate that is still malformed is reported (and its batch is
+// extracted again next run) instead of discarding every valid sibling; without
+// a report to record that, the batch fails as before.
+export async function extractEvents(
+  content: string,
+  sourceName: string,
+  sourceUrl: string,
+  apiKey: string,
+  options: { client?: Anthropic; report?: ExtractionReport } = {}
+): Promise<ScrapedEvent[]> {
+  if (content.length > MAX_EXTRACTION_CONTENT_CHARS) throw new Error("Extraction content exceeds the input limit");
+  const client = options.client ?? new Anthropic({ apiKey, timeout: 10 * 60 * 1000 });
+  const report = options.report;
+  console.log(`Content sent: ${content.length} chars`);
+
+  let attempt = readExtraction(await requestExtraction(client, content));
+  if (attempt instanceof Error || attempt.rejected.length > 0) {
+    console.warn(`Invalid extraction output (${attempt instanceof Error ? attempt.message : attempt.rejected.join("; ")}); retrying once`);
+    const retry = readExtraction(await requestExtraction(client, content));
+    if (!(retry instanceof Error) && (attempt instanceof Error || retry.rejected.length <= attempt.rejected.length)) {
+      attempt = retry;
+    }
+  }
+  if (attempt instanceof Error) throw attempt;
+  if (attempt.rejected.length > 0) {
+    if (!report) throw new Error(attempt.rejected[0]);
+    for (const reason of attempt.rejected) report.partial(reason);
+  }
+  const parsed = attempt.events;
 
   // The extractor must make an explicit temporal-vs-permanent decision for
   // every candidate. Fail closed when that decision or its source evidence is
@@ -295,7 +397,7 @@ export async function extractEvents(
   // not trigger extra model calls.
   const resolvedEvents = sourceName === "nycforfree"
     ? temporalEvents // The scraper overlays the source's actual addresses/pins; do not guess chain locations.
-    : await resolveVagueLocations(temporalEvents, client);
+    : await resolveVagueLocations(temporalEvents, client, report);
 
   return Promise.all(resolvedEvents.map(async (e) => {
     const { startTimestamp, endTimestamp } = parseEventTimes(e.date, e.startTime, e.endTime, e.endDate);
@@ -313,8 +415,16 @@ export async function extractEvents(
         candidateSourceUrl = e.url;
       }
     }
-    const resolvedSourceUrl =
-      (await resolveEventbriteUrl(e.title || "Untitled Event", candidateSourceUrl)) || sourceUrl;
+    let resolvedSourceUrl: string;
+    try {
+      resolvedSourceUrl = (await resolveEventbriteUrl(e.title || "Untitled Event", candidateSourceUrl)) || sourceUrl;
+    } catch (error) {
+      // Eventbrite search can refuse datacenter traffic. Publish the event
+      // with the listing link and retry its deep link on the next run.
+      if (!report) throw error;
+      report.partial(String(error));
+      resolvedSourceUrl = sourceUrl;
+    }
 
     return {
       title: e.title || "Untitled Event",
@@ -334,7 +444,10 @@ export async function extractEvents(
 const ITEM_SEPARATOR = "\n\n---\n\n";
 export const MAX_EXTRACTION_CONTENT_CHARS = 100_000;
 
-type ExtractItems = (content: string, sourceName: string, sourceUrl: string, apiKey: string) => Promise<ScrapedEvent[]>;
+type ExtractItems = (content: string, sourceName: string, sourceUrl: string, apiKey: string, report?: ExtractionReport) => Promise<ScrapedEvent[]>;
+
+const extractWithReport: ExtractItems = (content, sourceName, sourceUrl, apiKey, report) =>
+  extractEvents(content, sourceName, sourceUrl, apiKey, { report });
 
 function batchItems<T>(fresh: NewItems<T>): NewItems<T>[] {
   // Check all items first, before any model call or successful-key staging.
@@ -362,6 +475,8 @@ function batchItems<T>(fresh: NewItems<T>): NewItems<T>[] {
 // Each batch contains whole source items, never a truncated tail. Keys are
 // staged only after all batches succeed; malformed output throws to the source
 // caller rather than poisoning the cache or being counted as a healthy zero.
+// A batch whose extraction was only partly usable still delivers its events,
+// but its keys stay unstaged so those items are extracted again next run.
 export async function parseNewItems<T>(
   items: T[],
   toText: (item: T) => string,
@@ -373,11 +488,20 @@ export async function parseNewItems<T>(
   const fresh = await cache.filterNew(items, toText);
   const batches = batchItems(fresh);
   const events: ScrapedEvent[] = [];
+  const completeKeys: string[] = [];
   for (const batch of batches) {
     const text = batch.texts.join(ITEM_SEPARATOR);
     console.log(`Sending ${batch.items.length} ${cache.sourceName} items to Claude (${text.length} chars)`);
-    events.push(...await (options.extract ?? extractEvents)(text, cache.sourceName, sourceUrl, apiKey));
+    const problems: string[] = [];
+    const report: ExtractionReport = { partial: (reason) => { problems.push(reason); } };
+    events.push(...await (options.extract ?? extractWithReport)(text, cache.sourceName, sourceUrl, apiKey, report));
+    if (problems.length === 0) {
+      completeKeys.push(...batch.keys);
+      continue;
+    }
+    const shown = problems.slice(0, 3).join("; ");
+    cache.recordFailure(`${batch.items.length} item(s) will be extracted again: ${shown}${problems.length > 3 ? ` (+${problems.length - 3} more)` : ""}`);
   }
-  cache.stage(fresh.keys);
+  cache.stage(completeKeys);
   return { items: fresh.items, events };
 }

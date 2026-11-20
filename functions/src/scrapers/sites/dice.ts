@@ -1,5 +1,6 @@
-import { EventSource, ScrapedEvent } from "../base.js";
+import type { EventSource, ScrapedEvent, SourceLocation } from "../base.js";
 import type { ExtractionCache } from "../../services/extractionCache.js";
+import { isDiceEventUrl, isNycCentroid, isOutsideNyc, isSpecificSourceAddress, isWithinNyc } from "../../services/geocoder.js";
 import { parseNewItems } from "../../services/parser.js";
 
 const BROWSE_BASE =
@@ -22,20 +23,90 @@ const FETCH_HEADERS = {
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
 };
 
-interface DiceJsonLdEvent {
-  "@type"?: string;
+interface DicePostalAddress {
+  streetAddress?: string;
+  addressLocality?: string;
+  addressRegion?: string;
+  postalCode?: string;
+}
+
+export interface DiceJsonLdEvent {
+  "@type"?: string | string[];
   name?: string;
   description?: string;
   startDate?: string;
   endDate?: string;
   location?: {
     name?: string;
-    address?: string;
+    address?: string | DicePostalAddress;
     geo?: {
-      latitude?: number;
-      longitude?: number;
+      latitude?: number | string;
+      longitude?: number | string;
     };
   };
+}
+
+export interface DiceDetail {
+  event: DiceJsonLdEvent;
+  url: string;
+}
+
+const clean = (value: unknown) => typeof value === "string" ? value.replace(/\s+/g, " ").trim() : "";
+const withoutCountry = (value: string) => value.replace(/,\s*(?:United States|USA)$/i, "");
+
+// Dice publishes a schema.org PostalAddress object. Interpolating it into the
+// extraction text used to produce "[object Object]", leaving the model only
+// the venue name, which the geocoder usually could not place. Its
+// streetAddress normally already carries the borough, state and ZIP (and the
+// separate addressLocality is sometimes wrong), so it wins when complete.
+export function formatDiceAddress(address: unknown): string {
+  if (typeof address === "string") return withoutCountry(clean(address));
+  if (!address || typeof address !== "object") return "";
+  const postal = address as DicePostalAddress;
+  const street = withoutCountry(clean(postal.streetAddress));
+  if (street && /\b\d{5}\b|,\s*(?:NY|New York)\b/i.test(street)) return street;
+  const parts: string[] = [];
+  for (const part of [street, clean(postal.addressLocality), clean(postal.addressRegion), clean(postal.postalCode)]) {
+    if (part && !parts.some((previous) => previous.toLowerCase().includes(part.toLowerCase()))) parts.push(part);
+  }
+  return parts.join(", ");
+}
+
+export function diceVenueLabel(event: DiceJsonLdEvent): string {
+  const name = clean(event.location?.name);
+  const address = formatDiceAddress(event.location?.address);
+  if (!address) return name;
+  return name && !address.toLowerCase().includes(name.toLowerCase()) ? `${name}, ${address}` : address;
+}
+
+// The venue's own coordinates from the event page, trusted only inside NYC
+// and only for a specific street address on that same event URL.
+export function diceSourcePin(detail: DiceDetail): SourceLocation | undefined {
+  const address = formatDiceAddress(detail.event.location?.address);
+  const latitude = Number(detail.event.location?.geo?.latitude);
+  const longitude = Number(detail.event.location?.geo?.longitude);
+  if (!isDiceEventUrl(detail.url) || !isSpecificSourceAddress(address) || isOutsideNyc(address) ||
+      !isWithinNyc(latitude, longitude) || isNycCentroid(latitude, longitude)) return undefined;
+  const placeName = clean(detail.event.location?.name);
+  return { latitude, longitude, address, ...(placeName ? { placeName } : {}), sourceUrl: detail.url };
+}
+
+// Prefer the exact event URL the model copied from the item; fall back to a
+// title prefix only when it identifies exactly one item.
+export function matchDiceDetail(parsed: ScrapedEvent, details: DiceDetail[]): DiceDetail | undefined {
+  const byUrl = details.find((detail) => detail.url === parsed.sourceUrl);
+  if (byUrl) return byUrl;
+  const title = parsed.title.toLowerCase();
+  const byTitle = details.filter(({ event }) => event.name && title.includes(event.name.toLowerCase().slice(0, 20)));
+  return byTitle.length === 1 ? byTitle[0] : undefined;
+}
+
+export function overlayDiceDetail(parsed: ScrapedEvent, detail: DiceDetail): void {
+  parsed.sourceUrl = detail.url;
+  const pin = diceSourcePin(detail);
+  if (!pin) return;
+  parsed.location = diceVenueLabel(detail.event);
+  parsed.sourceLocation = pin;
 }
 
 function extractEventUrls(html: string): string[] {
@@ -56,17 +127,23 @@ function extractEventUrls(html: string): string[] {
   return urls;
 }
 
-function extractJsonLd(html: string): DiceJsonLdEvent | null {
+function isEventNode(value: unknown): value is DiceJsonLdEvent {
+  if (!value || typeof value !== "object") return false;
+  const types = ([] as unknown[]).concat((value as DiceJsonLdEvent)["@type"] ?? []);
+  return types.some((type) => typeof type === "string" && /Event$/.test(type));
+}
+
+export function extractJsonLd(html: string): DiceJsonLdEvent | null {
   const regex =
     /<script[^>]*type=["']application\/ld\+json["'][^>]*>([\s\S]*?)<\/script>/gi;
   let match;
   while ((match = regex.exec(html)) !== null) {
     try {
       const data = JSON.parse(match[1]);
-      const eventType = data["@type"] || "";
-      if (eventType.includes("Event") || eventType.includes("MusicEvent")) {
-        return data as DiceJsonLdEvent;
-      }
+      // MusicEvent, ScreeningEvent, ComedyEvent...: a node, an array or a @graph.
+      const candidates: unknown[] = Array.isArray(data) ? data : Array.isArray(data?.["@graph"]) ? data["@graph"] : [data];
+      const event = candidates.find(isEventNode);
+      if (event) return event;
     } catch {
       // skip malformed JSON-LD
     }
@@ -76,9 +153,9 @@ function extractJsonLd(html: string): DiceJsonLdEvent | null {
 
 async function fetchEventDetails(
   url: string
-): Promise<{ event: DiceJsonLdEvent; url: string } | null> {
+): Promise<DiceDetail | null> {
   try {
-    const response = await fetch(url, { headers: FETCH_HEADERS });
+    const response = await fetch(url, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(20_000) });
     if (!response.ok) {
       console.warn(`Dice event page ${response.status}: ${url}`);
       return null;
@@ -106,7 +183,7 @@ export function createDiceScraper(apiKey: string): EventSource {
 
       for (const browseUrl of browseUrls) {
         console.log(`Fetching Dice browse page: ${browseUrl}`);
-        const browseRes = await fetch(browseUrl, { headers: FETCH_HEADERS });
+        const browseRes = await fetch(browseUrl, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(30_000) });
         if (!browseRes.ok) {
           console.error(`Failed to fetch Dice browse page: ${browseRes.status}`);
           continue;
@@ -129,7 +206,7 @@ export function createDiceScraper(apiKey: string): EventSource {
 
       // Step 2: Fetch each event page for JSON-LD details
       const BATCH_SIZE = 5;
-      const allDetails: { event: DiceJsonLdEvent; url: string }[] = [];
+      const allDetails: DiceDetail[] = [];
 
       for (let i = 0; i < eventUrls.length; i += BATCH_SIZE) {
         const batch = eventUrls.slice(i, i + BATCH_SIZE);
@@ -147,10 +224,7 @@ export function createDiceScraper(apiKey: string): EventSource {
       );
 
       // Step 3: Format for Claude to categorize
-      const eventToText = ({ event, url }: { event: DiceJsonLdEvent; url: string }) => {
-        const locationParts: string[] = [];
-        if (event.location?.name) locationParts.push(event.location.name);
-        if (event.location?.address) locationParts.push(event.location.address);
+      const eventToText = ({ event, url }: DiceDetail) => {
 
         const start = new Date(event.startDate!);
         const end = event.endDate ? new Date(event.endDate) : null;
@@ -171,7 +245,7 @@ export function createDiceScraper(apiKey: string): EventSource {
           `Type: ${event["@type"] || "Event"}\n` +
           `Start (Eastern Time): ${formatET(start)}\n` +
           `End (Eastern Time): ${end ? formatET(end) : "unknown"}\n` +
-          `Location: ${locationParts.join(", ")}\n` +
+          `Location: ${diceVenueLabel(event)}\n` +
           `URL: ${url}`
         );
       };
@@ -185,22 +259,11 @@ export function createDiceScraper(apiKey: string): EventSource {
       );
       console.log(`Claude returned ${parsedEvents.length} categorized events`);
 
-      // Step 4: Overlay geo coordinates and individual event URLs from JSON-LD
+      // Step 4: Overlay the event URL, venue address and the venue's own
+      // coordinates from that event's JSON-LD.
       for (const parsed of parsedEvents) {
-        const match = sentDetails.find(
-          ({ event }) =>
-            event.name &&
-            parsed.title
-              .toLowerCase()
-              .includes(event.name.toLowerCase().slice(0, 20))
-        );
-        if (match) {
-          if (match.event.location?.geo) {
-            parsed.latitude = match.event.location.geo.latitude;
-            parsed.longitude = match.event.location.geo.longitude;
-          }
-          parsed.sourceUrl = match.url;
-        }
+        const match = matchDiceDetail(parsed, sentDetails);
+        if (match) overlayDiceDetail(parsed, match);
       }
 
       return parsedEvents;

@@ -1,5 +1,6 @@
 import { EventSource, ScrapedEvent } from "../base.js";
 import type { ExtractionCache } from "../../services/extractionCache.js";
+import { isNycCentroid, isOhMyRocknessShowUrl, isOutsideNyc, isSpecificSourceAddress, isWithinNyc } from "../../services/geocoder.js";
 import { parseNewItems } from "../../services/parser.js";
 
 // https://www.ohmyrockness.com/shows renders its "Shows / By / Date" list
@@ -140,7 +141,7 @@ function showToText(show: OmrShow): string {
 // Overlay coordinates and URLs from the best structured-data match.
 // Artist names repeat across dates and venues, so score venue and time
 // instead of always taking the first show with the same band.
-function overlayShowData(parsed: ScrapedEvent, shows: OmrShow[]): void {
+export function overlayShowData(parsed: ScrapedEvent, shows: OmrShow[]): void {
   const parsedLocation = parsed.location.toLowerCase();
   const candidates = shows
     .filter((show) => {
@@ -167,13 +168,21 @@ function overlayShowData(parsed: ScrapedEvent, shows: OmrShow[]): void {
     .sort((a, b) => b.score - a.score);
   const match = candidates[0]?.show;
   if (!match) return;
-  if (match.venue?.latitude && match.venue?.longitude) {
-    parsed.latitude = parseFloat(match.venue.latitude);
-    parsed.longitude = parseFloat(match.venue.longitude);
-  }
   if (match.url) {
     parsed.sourceUrl = match.url.replace(/^http:/, "https:");
   }
+  // The venue's own coordinates become a trusted pin only for a show whose
+  // start time the extraction reproduced, inside NYC, at a street address.
+  const startsAt = match.starts_at ? Date.parse(match.starts_at) : NaN;
+  const sameShow = Number.isFinite(startsAt) && Math.abs(startsAt - parsed.startTimestamp) <= 15 * 60 * 1000;
+  const address = match.venue?.full_address?.replace(/\s*\n\s*/g, ", ").replace(/\s+/g, " ").trim() ?? "";
+  const latitude = Number(match.venue?.latitude);
+  const longitude = Number(match.venue?.longitude);
+  if (!sameShow || !isOhMyRocknessShowUrl(parsed.sourceUrl) || !isSpecificSourceAddress(address) || isOutsideNyc(address) ||
+      !isWithinNyc(latitude, longitude) || isNycCentroid(latitude, longitude)) return;
+  const venueName = match.venue?.name?.trim();
+  parsed.location = venueName && !address.toLowerCase().includes(venueName.toLowerCase()) ? `${venueName}, ${address}` : address;
+  parsed.sourceLocation = { latitude, longitude, address, ...(venueName ? { placeName: venueName } : {}), sourceUrl: parsed.sourceUrl };
 }
 
 export function createOhMyRocknessScraper(apiKey: string): EventSource {

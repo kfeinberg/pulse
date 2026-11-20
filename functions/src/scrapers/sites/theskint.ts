@@ -13,11 +13,12 @@ export function createTheSkintScraper(apiKey: string): EventSource {
     name: "theskint",
     async scrape(cache: ExtractionCache): Promise<ScrapedEvent[]> {
       console.log(`Fetching The Skint: ${BASE_URL}`);
-      const response = await fetch(BASE_URL, { headers: FETCH_HEADERS });
+      const response = await fetch(BASE_URL, { headers: FETCH_HEADERS, signal: AbortSignal.timeout(30_000) });
 
+      // The page is a single item, so the circuit breaker never sees a drop
+      // from the usual count: report a failed fetch as an error instead.
       if (!response.ok) {
-        console.error(`The Skint fetch failed (${response.status})`);
-        return [];
+        throw new Error(`The Skint fetch failed (${response.status})`);
       }
 
       const html = await response.text();

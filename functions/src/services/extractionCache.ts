@@ -103,6 +103,7 @@ export interface NewItems<T> {
 // whose extraction or write failed is extracted again next run.
 export class ExtractionCache {
   private readonly staged = new Set<string>();
+  private readonly failures: string[] = [];
   private skippedCount = 0;
   private seenCount = 0;
 
@@ -155,6 +156,23 @@ export class ExtractionCache {
   // Marks keys whose extraction succeeded; they are saved by commit().
   stage(keys: string[]): void {
     for (const key of keys) this.staged.add(key);
+  }
+
+  // Withdraws keys whose items must be extracted again next run (for example
+  // an item whose event link could not be resolved this time).
+  unstage(keys: string[]): void {
+    for (const key of keys) this.staged.delete(key);
+  }
+
+  // Item-level problems that were isolated instead of failing the whole
+  // source. They are kept in the run summary so they stay visible.
+  recordFailure(reason: string): void {
+    this.failures.push(reason);
+    console.warn(`${this.sourceName}: ${reason}`);
+  }
+
+  get failureReasons(): string[] {
+    return [...this.failures];
   }
 
   // Durable extraction checkpoints can restore these keys after an enqueue

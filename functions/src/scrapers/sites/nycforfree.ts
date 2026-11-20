@@ -199,32 +199,64 @@ function recurringDays(raw: string): string[] {
   if (days.some((day) => !day)) throw new Error(`Invalid NYC for FREE recurring days: ${raw}`);
   return [...new Set(days as string[])];
 }
-export function parseWebflowEvents(html: string): WebflowEvent[] {
+export interface CardFailure {
+  slug?: string;
+  error: Error;
+}
+function asError(error: unknown): Error {
+  return error instanceof Error ? error : new Error(String(error));
+}
+function parseCard(node: HtmlNode): WebflowEvent {
+  const a = node.attrs;
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(a.slug)) throw new Error(`Invalid NYC for FREE slug: ${a.slug}`);
+  const f = fields(node);
+  const startDate = sourceDate(f["start-date"] || a["start-date"]);
+  const endDate = sourceDate(f["end-date"] || a["end-date"] || startDate);
+  const startTime = sourceTime(f["start-time"] || a["start-time"] || "12:00");
+  const endTime = sourceTime(f["end-time"] || a["end-time"] || "23:59");
+  parseEventTimes(startDate, startTime, endTime, endDate);
+  const event: WebflowEvent = {
+    title: a.title, slug: a.slug, description: f.description || a.description || "",
+    startDate, endDate, startTime, endTime,
+    address: a.address || "", borough: a.borough || "", frequency: f.frequency || a.frequency || "One-time", sourceCategory: a.category || "",
+    recurringDays: recurringDays(f["recurrent-days"] || f["recurring-days"] || a["recurring-days"] || ""),
+    occurrences: parseOccurrences(f.occurrences || "", startTime, endTime),
+    locations: parseLocations(f.locations || ""),
+  };
+  if (!event.locations.length && event.address) event.locations.push({ address: event.address, borough: event.borough, name: a.place || undefined, latitude: coordinate(a.lat), longitude: coordinate(a.long) });
+  return event;
+}
+// Every card is validated as strictly as before, but one malformed or
+// conflicting card is reported on its own instead of hiding every other card.
+export function readWebflowCards(html: string): { events: WebflowEvent[]; failures: CardFailure[] } {
   const events = new Map<string, WebflowEvent>();
+  const conflicted = new Set<string>();
+  const failures: CardFailure[] = [];
   for (const node of nodes(readHtml(html))) {
     const a = node.attrs;
     if (!a.class?.split(/\s+/).includes("w-dyn-item") || !a.title || !a.slug || !a["start-date"]) continue;
-    if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(a.slug)) throw new Error(`Invalid NYC for FREE slug: ${a.slug}`);
-    const f = fields(node);
-    const startDate = sourceDate(f["start-date"] || a["start-date"]);
-    const endDate = sourceDate(f["end-date"] || a["end-date"] || startDate);
-    const startTime = sourceTime(f["start-time"] || a["start-time"] || "12:00");
-    const endTime = sourceTime(f["end-time"] || a["end-time"] || "23:59");
-    parseEventTimes(startDate, startTime, endTime, endDate);
-    const event: WebflowEvent = {
-      title: a.title, slug: a.slug, description: f.description || a.description || "",
-      startDate, endDate, startTime, endTime,
-      address: a.address || "", borough: a.borough || "", frequency: f.frequency || a.frequency || "One-time", sourceCategory: a.category || "",
-      recurringDays: recurringDays(f["recurrent-days"] || f["recurring-days"] || a["recurring-days"] || ""),
-      occurrences: parseOccurrences(f.occurrences || "", startTime, endTime),
-      locations: parseLocations(f.locations || ""),
-    };
-    if (!event.locations.length && event.address) event.locations.push({ address: event.address, borough: event.borough, name: a.place || undefined, latitude: coordinate(a.lat), longitude: coordinate(a.long) });
+    let event: WebflowEvent;
+    try {
+      event = parseCard(node);
+    } catch (error) {
+      failures.push({ slug: a.slug, error: asError(error) });
+      continue;
+    }
     const previous = events.get(event.slug);
-    if (previous && toText(previous) !== toText(event)) throw new Error(`Conflicting NYC for FREE cards: ${event.slug}`);
+    if (previous && toText(previous) !== toText(event)) {
+      failures.push({ slug: event.slug, error: new Error(`Conflicting NYC for FREE cards: ${event.slug}`) });
+      conflicted.add(event.slug);
+      continue;
+    }
     events.set(event.slug, event);
   }
-  return [...events.values()];
+  for (const slug of conflicted) events.delete(slug);
+  return { events: [...events.values()], failures };
+}
+export function parseWebflowEvents(html: string): WebflowEvent[] {
+  const { events, failures } = readWebflowCards(html);
+  if (failures.length) throw failures[0].error;
+  return events;
 }
 function eventUrl(event: WebflowEvent): string { return `${BASE_URL}/${event.slug}`; }
 // Keep every authoritative field in the exact extraction text/cache fingerprint.
@@ -428,60 +460,83 @@ function withSource(template: ScrapedEvent, source: WebflowEvent, loc: WebflowLo
   result.sourceOccurrenceId = `${source.slug}|${identity}|${locationIdentity(source, loc, result.location)}`;
   return result;
 }
-export function overlayNycForFreeEvents(sources: WebflowEvent[], parsed: ScrapedEvent[]): ScrapedEvent[] {
-  const grouped = new Map<WebflowEvent, ScrapedEvent[]>();
-  for (const event of parsed) {
-    const reason = temporalExclusionReason(event);
-    if (reason) {
-      if ((event.temporalStatus as string) === "permanent_attraction") continue;
-      throw new Error(`Invalid NYC for FREE temporal extraction: ${reason}`);
-    }
-    const source = matchSource(event, sources);
-    grouped.set(source, [...(grouped.get(source) || []), event]);
-  }
+function cardEvents(source: WebflowEvent, templates: ScrapedEvent[]): ScrapedEvent[] {
   const output: ScrapedEvent[] = [];
-  for (const [source, templates] of grouped) {
-    const occurrences = datedOccurrences(source);
-    const single = source.locations.length === 1 && specificAddress(source.locations[0].address);
-    if (source.locations.length > 1 && occurrences.length) {
-      // Binding comes from literal source location/date markers, not the model
-      // and never from the product of two independent arrays. One classified
-      // template can recover all proven stops even if extraction omitted one
-      // or attached a real location to the wrong date.
-      for (const occurrence of boundOccurrences(source, occurrences)) {
-        const loc = source.locations.find((candidate) => candidate.address === occurrence.locationAddress)!;
-        output.push(withSource(templates[0], source, loc, occurrence));
+  const occurrences = datedOccurrences(source);
+  const single = source.locations.length === 1 && specificAddress(source.locations[0].address);
+  if (source.locations.length > 1 && occurrences.length) {
+    // Binding comes from literal source location/date markers, not the model
+    // and never from the product of two independent arrays. One classified
+    // template can recover all proven stops even if extraction omitted one
+    // or attached a real location to the wrong date.
+    for (const occurrence of boundOccurrences(source, occurrences)) {
+      const loc = source.locations.find((candidate) => candidate.address === occurrence.locationAddress)!;
+      output.push(withSource(templates[0], source, loc, occurrence));
+    }
+  } else if (single && occurrences.length) {
+    // One classified template, one explicit location: only the source's
+    // actual occurrences, including day-specific closing times.
+    for (const occurrence of occurrences) {
+      const template = templates.find((event) => event.startTimestamp === parseEventTimes(occurrence.date, occurrence.startTime, occurrence.endTime).startTimestamp) || templates[0];
+      output.push(withSource(template, source, source.locations[0], occurrence));
+    }
+  } else if (single && !occurrences.length && templates.every((template) => template.temporalStatus === "limited_run") && source.endDate > source.startDate && /^(one-time|continuous)$/i.test(source.frequency)) {
+    output.push(withSource(templates[0], source, source.locations[0], { date: source.startDate, endDate: source.endDate, startTime: source.startTime, endTime: source.endTime }, true));
+  } else {
+    for (const template of templates) {
+      const loc = matchingLocation(template, source);
+      let occurrence: SourceOccurrence | undefined;
+      if (occurrences.length) {
+        const candidates = occurrences.filter((candidate) => candidate.date === localDate(template.startTimestamp));
+        const matches = candidates.length === 1 ? candidates : candidates.filter((candidate) => parseEventTimes(candidate.date, candidate.startTime, candidate.endTime).startTimestamp === template.startTimestamp);
+        if (matches.length !== 1) throw new Error(`Unbacked NYC for FREE occurrence: ${source.slug}`);
+        occurrence = matches[0];
+        // Deliberately retain the model/source-backed pairing. Independent
+        // location/date arrays are not a license to manufacture their product.
+      } else if (single && templates.length === 1 && source.startDate === source.endDate) {
+        occurrence = { date: source.startDate, startTime: source.startTime, endTime: source.endTime };
       }
-    } else if (single && occurrences.length) {
-      // One classified template, one explicit location: only the source's
-      // actual occurrences, including day-specific closing times.
-      for (const occurrence of occurrences) {
-        const template = templates.find((event) => event.startTimestamp === parseEventTimes(occurrence.date, occurrence.startTime, occurrence.endTime).startTimestamp) || templates[0];
-        output.push(withSource(template, source, source.locations[0], occurrence));
-      }
-    } else if (single && !occurrences.length && templates.every((template) => template.temporalStatus === "limited_run") && source.endDate > source.startDate && /^(one-time|continuous)$/i.test(source.frequency)) {
-      output.push(withSource(templates[0], source, source.locations[0], { date: source.startDate, endDate: source.endDate, startTime: source.startTime, endTime: source.endTime }, true));
-    } else {
-      for (const template of templates) {
-        const loc = matchingLocation(template, source);
-        let occurrence: SourceOccurrence | undefined;
-        if (occurrences.length) {
-          const candidates = occurrences.filter((candidate) => candidate.date === localDate(template.startTimestamp));
-          const matches = candidates.length === 1 ? candidates : candidates.filter((candidate) => parseEventTimes(candidate.date, candidate.startTime, candidate.endTime).startTimestamp === template.startTimestamp);
-          if (matches.length !== 1) throw new Error(`Unbacked NYC for FREE occurrence: ${source.slug}`);
-          occurrence = matches[0];
-          // Deliberately retain the model/source-backed pairing. Independent
-          // location/date arrays are not a license to manufacture their product.
-        } else if (single && templates.length === 1 && source.startDate === source.endDate) {
-          occurrence = { date: source.startDate, startTime: source.startTime, endTime: source.endTime };
-        }
-        const trustPin = !(source.locations.length > 1 && !occurrences.length && source.endDate > source.startDate);
-        const slot = inferredSlot(template, templates, source);
-        output.push(withSource(template, source, loc, occurrence, false, trustPin, slot));
-      }
+      const trustPin = !(source.locations.length > 1 && !occurrences.length && source.endDate > source.startDate);
+      const slot = inferredSlot(template, templates, source);
+      output.push(withSource(template, source, loc, occurrence, false, trustPin, slot));
     }
   }
   return deduplicateEvents(output);
+}
+// Each source card is resolved with the same strict rules, but in isolation:
+// an ambiguous card yields no events and is reported, without discarding the
+// events of every other card on the listing.
+export function overlayNycForFreeCards(sources: WebflowEvent[], parsed: ScrapedEvent[]): { events: ScrapedEvent[]; failures: CardFailure[] } {
+  const failures: CardFailure[] = [];
+  const grouped = new Map<WebflowEvent, ScrapedEvent[]>();
+  for (const event of parsed) {
+    try {
+      const reason = temporalExclusionReason(event);
+      if (reason) {
+        if ((event.temporalStatus as string) === "permanent_attraction") continue;
+        throw new Error(`Invalid NYC for FREE temporal extraction: ${reason}`);
+      }
+      const source = matchSource(event, sources);
+      grouped.set(source, [...(grouped.get(source) || []), event]);
+    } catch (error) {
+      failures.push({ error: asError(error) });
+    }
+  }
+  const output: ScrapedEvent[] = [];
+  for (const [source, templates] of grouped) {
+    try {
+      output.push(...cardEvents(source, templates));
+    } catch (error) {
+      failures.push({ slug: source.slug, error: asError(error) });
+    }
+  }
+  // Occurrence IDs begin with the card's unique slug, so cards cannot collide.
+  return { events: output, failures };
+}
+export function overlayNycForFreeEvents(sources: WebflowEvent[], parsed: ScrapedEvent[]): ScrapedEvent[] {
+  const { events, failures } = overlayNycForFreeCards(sources, parsed);
+  if (failures.length) throw failures[0].error;
+  return events;
 }
 function deduplicateEvents(events: ScrapedEvent[]): ScrapedEvent[] {
   const unique = new Map<string, ScrapedEvent>();
@@ -515,6 +570,7 @@ export interface NycForFreeDependencies {
 class DeferredCache extends ExtractionCache {
   constructor(private readonly delegate: ExtractionCache) { super(delegate.sourceName); }
   override filterNew<T>(items: T[], convert: (item: T) => string) { return this.delegate.filterNew(items, convert); }
+  override recordFailure(reason: string) { this.delegate.recordFailure(reason); }
 }
 class MissingDetailError extends Error {}
 
@@ -542,18 +598,38 @@ function needsDetail(event: WebflowEvent): boolean {
   return !event.locations.length || event.locations.some((loc) => !specificAddress(loc.address))
     || ((!event.occurrences.length && !event.recurringDays.length) && /(?:…|\.{3})\s*$/.test(event.description));
 }
+// Merge a retry's events into the first pass card by card. A card whose two
+// passes disagree about one occurrence identity is dropped and reported.
+function mergeCardEvents(first: ScrapedEvent[], retry: ScrapedEvent[], failures: CardFailure[]): ScrapedEvent[] {
+  const bySlug = new Map<string, ScrapedEvent[]>();
+  for (const event of [...first, ...retry]) {
+    const slug = event.sourceOccurrenceId!.split("|")[0];
+    bySlug.set(slug, [...(bySlug.get(slug) || []), event]);
+  }
+  const merged: ScrapedEvent[] = [];
+  for (const [slug, events] of bySlug) {
+    try {
+      merged.push(...deduplicateEvents(events));
+    } catch (error) {
+      failures.push({ slug, error: asError(error) });
+    }
+  }
+  return merged;
+}
 export function createNycForFreeScraper(apiKey: string, dependencies: NycForFreeDependencies = {}): EventSource {
   const request = dependencies.fetch ?? fetch;
   return {
     name: "nycforfree",
     async scrape(cache): Promise<ScrapedEvent[]> {
-      const events = parseWebflowEvents(await fetchHtml(BASE_URL, request));
-      if (!events.length) throw new Error("No NYC for FREE event cards found");
+      const listing = readWebflowCards(await fetchHtml(BASE_URL, request));
+      const failures: CardFailure[] = [...listing.failures];
+      const events = listing.events;
+      if (!events.length) throw failures[0]?.error ?? new Error("No NYC for FREE event cards found");
       // Refresh necessary details even when the listing is unchanged: a listing
       // cache hit must not suppress a corrected detail forever. At most four
       // requests concurrently; extraction still runs only on changed full text.
       let cursor = 0;
-      const enriched = [...events];
+      const enriched: Array<WebflowEvent | null> = [...events];
       await Promise.all(Array.from({ length: Math.min(DETAIL_CONCURRENCY, events.length) }, async () => {
         while (cursor < events.length) {
           const index = cursor++;
@@ -561,20 +637,37 @@ export function createNycForFreeScraper(apiKey: string, dependencies: NycForFree
             try {
               enriched[index] = enrichDetail(events[index], await fetchHtml(eventUrl(events[index]), request));
             } catch (error) {
-              if (!(error instanceof MissingDetailError)) throw error;
-              // The publisher still lists this card. Use only its published
-              // facts, not the unrelated listing body returned by the redirect.
-              // Retry enrichment next run; never delete or cache away this item.
-              enriched[index] = { ...events[index], detailUnavailable: true };
-              console.warn(error.message);
+              if (error instanceof MissingDetailError) {
+                // The publisher still lists this card. Use only its published
+                // facts, not the unrelated listing body returned by the redirect.
+                // Retry enrichment next run; never delete or cache away this item.
+                enriched[index] = { ...events[index], detailUnavailable: true };
+                console.warn(error.message);
+              } else {
+                // Denied, failing or ambiguous details never get the fallback.
+                // Hold back this card only; it is retried on the next run.
+                enriched[index] = null;
+                failures.push({ slug: events[index].slug, error: asError(error) });
+              }
             }
           }
         }
       }));
+      const usable = enriched.filter((event): event is WebflowEvent => event !== null);
+      if (!usable.length) throw failures[0].error;
       const deferred = new DeferredCache(cache);
-      const first = await parseNewItems(enriched, toText, deferred, BASE_URL, apiKey, { extract: dependencies.extract });
-      let results = overlayNycForFreeEvents(first.items, first.events);
-      const missing = first.items.filter((source) => !sourceComplete(source, results));
+      const first = await parseNewItems(usable, toText, deferred, BASE_URL, apiKey, { extract: dependencies.extract });
+      const firstOverlay = overlayNycForFreeCards(first.items, first.events);
+      failures.push(...firstOverlay.failures);
+      let results = firstOverlay.events;
+      const complete = (source: WebflowEvent): boolean => {
+        try {
+          return sourceComplete(source, results);
+        } catch {
+          return false; // The overlay already reported why this card is unusable.
+        }
+      };
+      const missing = first.items.filter((source) => !complete(source));
       if (missing.length) {
         // Retry omissions once as a separate, smaller batch. An empty result may
         // be an intentional permanent-attraction exclusion: never synthesize a
@@ -582,9 +675,18 @@ export function createNycForFreeScraper(apiKey: string, dependencies: NycForFree
         // items remain unstaged, so they are not lost to the extraction cache.
         const retryCache = new ExtractionCache(cache.sourceName, { force: true });
         const retry = await parseNewItems(missing, toText, retryCache, BASE_URL, apiKey, { extract: dependencies.extract });
-        results = deduplicateEvents([...results, ...overlayNycForFreeEvents(retry.items, retry.events)]);
+        const retryOverlay = overlayNycForFreeCards(retry.items, retry.events);
+        failures.push(...retryOverlay.failures);
+        results = mergeCardEvents(results, retryOverlay.events, failures);
       }
-      cache.stage(first.items.filter((source) => !source.detailUnavailable && sourceComplete(source, results)).map((source) => itemKey(cache.sourceName, toText(source))));
+      // Report what is still unresolved: a card the retry completed is fine.
+      const reported = [...new Map(failures.map((failure) => [`${failure.slug ?? ""}|${failure.error.message}`, failure])).values()]
+        .filter((failure) => !failure.slug || !first.items.some((source) => source.slug === failure.slug && complete(source)));
+      for (const failure of reported) cache.recordFailure(failure.error.message);
+      // Nothing usable, nothing already extracted, and something failed: this
+      // is a broken source, not a healthy empty listing.
+      if (!results.length && reported.length && cache.skipped === 0) throw reported[0].error;
+      cache.stage(first.items.filter((source) => !source.detailUnavailable && complete(source)).map((source) => itemKey(cache.sourceName, toText(source))));
       return results;
     },
   };

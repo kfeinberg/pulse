@@ -59,7 +59,8 @@ function stageDeps(apiKey: string): StageDeps {
 function describe(summary: SourceRunSummary): string {
   const base =
     `${summary.source}: listed ${summary.listed}, extracted ${summary.extracted} new events ` +
-    `(${summary.skippedByCache} items already extracted), queued ${summary.queued}`;
+    `(${summary.skippedByCache} items already extracted), queued ${summary.queued}` +
+    (summary.failed ? `; ${summary.failed} item problem(s) isolated, e.g. ${summary.failureSamples?.[0] ?? "unknown"}` : "");
   return summary.health.tripped ? `${base}; HELD by circuit breaker: ${summary.health.reason}` : base;
 }
 
