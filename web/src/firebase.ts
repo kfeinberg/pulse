@@ -61,7 +61,8 @@ export function onAuthChange(callback: (user: User | null) => void): () => void 
 }
 
 export function subscribeToUpcomingEvents(
-  callback: (events: AppEvent[]) => void
+  callback: (events: AppEvent[]) => void,
+  onError: (error: Error) => void,
 ): () => void {
   const now = Timestamp.now();
   const q = query(
@@ -76,7 +77,7 @@ export function subscribeToUpcomingEvents(
       return { ...data, id: doc.id, category: eventCategory(data) } as AppEvent;
     });
     callback(events);
-  });
+  }, onError);
 
   return unsubscribe;
 }

@@ -1,10 +1,14 @@
 import { useEffect, useState, useMemo, useCallback, useRef } from 'react';
-import { GoogleMap, useJsApiLoader, OverlayViewF, OverlayView } from '@react-google-maps/api';
+import { GoogleMap, OverlayViewF, OverlayView } from '@react-google-maps/api';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, signInWithGoogle, signOut, onAuthChange, User, createReport, subscribeToReports, confirmReport, addComment, subscribeToComments, deleteEvent, deleteReport, getUserProfile, isDisplayNameTaken, setUserProfile, deleteAccount, flagContent } from './firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from './votes';
 import { CATEGORIES, ADMIN_EMAIL } from './categories';
 import { MAP_STYLE } from './mapStyle';
 import { AppEvent, EventCategory, Comment, Report, ReportCategory, FlagReason } from './types';
+import { browseDays, dateKey, eventTimeLabel, hourOptions, matchesTime, timeLabel } from './browseTime';
+import { MapSurface } from './MapSurface';
+import { PanelDialog } from './PanelDialog';
+import './app.css';
 
 const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; color: string }> = {
   live_music: { emoji: '🎵', label: 'Live Music', color: '#9b59b6' },
@@ -16,50 +20,7 @@ const REPORT_CATEGORIES: Record<ReportCategory, { emoji: string; label: string; 
 };
 
 const NYC_CENTER = { lat: 40.7128, lng: -74.006 };
-const WELCOME_KEY = 'pulse_welcomed';
-const HOUR_MS = 60 * 60 * 1000;
-const UPCOMING_BROWSER_HOURS = 72;
-
-function getDateKey(time: Date): string {
-  return `${time.getFullYear()}-${time.getMonth()}-${time.getDate()}`;
-}
-
-function formatBrowseDay(time: Date, now: Date): string {
-  const day = new Date(time);
-  day.setHours(0, 0, 0, 0);
-  const today = new Date(now);
-  today.setHours(0, 0, 0, 0);
-  const tomorrow = new Date(today);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  if (day.getTime() === today.getTime()) return 'Today';
-  if (day.getTime() === tomorrow.getTime()) return 'Tomorrow';
-  return time.toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' });
-}
-
-function formatBrowseTime(time: Date, isNow: boolean): string {
-  if (isNow) return 'Now';
-  return time.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-}
-
-function formatTime(millis: number) {
-  const d = new Date(millis);
-  const now = new Date();
-  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const tomorrow = new Date(today.getTime() + 86400000);
-  const eventDay = new Date(d.getFullYear(), d.getMonth(), d.getDate());
-
-  const h = d.getHours();
-  const hour = h % 12 || 12;
-  const ampm = h < 12 ? 'AM' : 'PM';
-  const min = d.getMinutes().toString().padStart(2, '0');
-  const time = `${hour}:${min} ${ampm}`;
-
-  if (eventDay.getTime() === today.getTime()) return `Today, ${time}`;
-  if (eventDay.getTime() === tomorrow.getTime()) return `Tomorrow, ${time}`;
-
-  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  return `${months[d.getMonth()]} ${d.getDate()}, ${time}`;
-}
+const CATEGORY_KEYS = Object.keys(CATEGORIES) as EventCategory[];
 
 function getDistanceMiles(lat1: number, lon1: number, lat2: number, lon2: number): number {
   const R = 3958.8;
@@ -99,6 +60,7 @@ export function App() {
   }, []);
 
   const handleSetName = async () => {
+    if (!user || nameChecking) return;
     const name = nameInput.trim();
     if (!name || name.length < 2) {
       setNameError('Name must be at least 2 characters');
@@ -117,7 +79,7 @@ export function App() {
         setNameChecking(false);
         return;
       }
-      await setUserProfile(user!.uid, name, user!.photoURL || undefined);
+      await setUserProfile(user.uid, name, user.photoURL || undefined);
       setDisplayName(name);
       setShowNameModal(false);
     } catch (err: any) {
@@ -130,16 +92,17 @@ export function App() {
   return (
     <>
       {showNameModal && (
-        <div style={styles.welcomeBackdrop}>
+        <PanelDialog titleId="profile-name-title" className="profile-dialog" close={() => setShowNameModal(false)}>
           <div style={styles.welcomeModal}>
             <div style={styles.welcomeHeader}>
               <div style={styles.welcomeDot} />
               <span style={styles.welcomeTitle}>Pulse</span>
             </div>
-            <p style={styles.authSubtitle}>Choose a display name</p>
+            <h2 id="profile-name-title" style={styles.authSubtitle}>Choose a display name</h2>
             <input
               style={styles.nameInput}
               placeholder="Display name"
+              aria-label="Display name"
               value={nameInput}
               onChange={(e) => setNameInput(e.target.value)}
               maxLength={20}
@@ -154,8 +117,9 @@ export function App() {
             >
               {nameChecking ? 'Checking...' : 'Continue'}
             </button>
+            <button className="text-button" onClick={() => setShowNameModal(false)}>Not now</button>
           </div>
-        </div>
+        </PanelDialog>
       )}
       <AppContent user={user} displayName={displayName} />
     </>
@@ -163,24 +127,24 @@ export function App() {
 }
 
 function AppContent({ user, displayName }: { user: User | null; displayName: string | null }) {
-  const { isLoaded } = useJsApiLoader({
-    googleMapsApiKey: import.meta.env.VITE_GOOGLE_MAPS_API_KEY || '',
-  });
-
   const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
-  const [events, setEvents] = useState<AppEvent[]>([]);
-  const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
-  const [listTimelineIndex, setListTimelineIndex] = useState(0);
-  const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
+  const [feedStatus, setFeedStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  const [feedAttempt, setFeedAttempt] = useState(0);
+  const [selectedEventId, setSelectedEventId] = useState<string | null>(null);
+  const [day, setDay] = useState<string | null>(null);
+  const [time, setTime] = useState<number | 'all' | 'now'>('all');
+  const [now, setNow] = useState(Date.now);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
-  const [showWelcome, setShowWelcome] = useState(() => !localStorage.getItem(WELCOME_KEY));
   const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [activeCategories, setActiveCategories] = useState<Set<EventCategory>>(
-    new Set(Object.keys(CATEGORIES) as EventCategory[])
+    new Set(CATEGORY_KEYS)
   );
   const [userLocation, setUserLocation] = useState<{ lat: number; lng: number } | null>(null);
-  const [showListView, setShowListView] = useState(false);
+  const [locationStatus, setLocationStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  const [showListView, setShowListView] = useState(true);
+  const [mapVisited, setMapVisited] = useState(false);
+  const [signInError, setSignInError] = useState(false);
   const [reports, setReports] = useState<Report[]>([]);
   const [pinDropMode, setPinDropMode] = useState(false);
   const [pendingPin, setPendingPin] = useState<{ lat: number; lng: number } | null>(null);
@@ -206,13 +170,42 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     setHiddenMap(getHiddenContent());
   }, []);
 
-  // Get user location
   useEffect(() => {
-    navigator.geolocation?.getCurrentPosition(
-      (pos) => setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
-      () => {},
-    );
+    const tick = () => setNow(Date.now());
+    const timer = window.setInterval(tick, 30_000);
+    document.addEventListener('visibilitychange', tick);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener('visibilitychange', tick);
+    };
   }, []);
+
+  const toggleNearby = () => {
+    if (userLocation) { setUserLocation(null); return; }
+    if (!navigator.geolocation) { setLocationStatus('error'); return; }
+    setLocationStatus('loading');
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        setUserLocation({ lat: coords.latitude, lng: coords.longitude });
+        setLocationStatus('idle');
+      },
+      () => setLocationStatus('error'),
+      { timeout: 10_000 },
+    );
+  };
+
+  const handleSignIn = async () => {
+    setSignInError(false);
+    try { await signInWithGoogle(); } catch { setSignInError(true); }
+  };
+
+  const selectView = (list: boolean) => {
+    setShowListView(list);
+    if (!list) setMapVisited(true);
+    setSelectedEventId(null);
+    setSelectedReport(null);
+    setShowProfileMenu(false);
+  };
 
   const handleVote = useCallback((event: AppEvent, voteType: 'up' | 'down') => {
     const previousVote = votes[event.id] ?? null;
@@ -234,25 +227,9 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
       return updated;
     };
     setAllEvents((prev) => prev.map(applyVoteUpdate));
-    setEvents((prev) => prev.map(applyVoteUpdate));
 
     setVotes((prev) => ({ ...prev, [event.id]: newVote }));
     setVote(event.id, newVote);
-
-    setSelectedEvent((prev) => {
-      if (!prev || prev.id !== event.id) return prev;
-      const updated = { ...prev };
-      if (previousVote === voteType) {
-        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
-        else updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
-      } else {
-        if (voteType === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) + 1;
-        else updated.thumbsDown = (updated.thumbsDown ?? 0) + 1;
-        if (previousVote === 'up') updated.thumbsUp = (updated.thumbsUp ?? 0) - 1;
-        if (previousVote === 'down') updated.thumbsDown = (updated.thumbsDown ?? 0) - 1;
-      }
-      return updated;
-    });
 
     voteOnEvent(event.id, voteType, previousVote).catch(console.warn);
   }, [votes]);
@@ -282,14 +259,6 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     setAllEvents((prev) => prev.map((e) =>
       e.id === event.id ? { ...e, interested: (e.interested ?? 0) + delta } : e
     ));
-    setEvents((prev) => prev.map((e) =>
-      e.id === event.id ? { ...e, interested: (e.interested ?? 0) + delta } : e
-    ));
-    setSelectedEvent((prev) => {
-      if (!prev || prev.id !== event.id) return prev;
-      return { ...prev, interested: (prev.interested ?? 0) + delta };
-    });
-
     setInterestedMap((prev) => {
       const next = { ...prev };
       if (wasInterested) delete next[event.id];
@@ -300,16 +269,11 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     markInterested(event.id, wasInterested).catch(console.warn);
   }, [interestedMap]);
 
-  const eventsForMap = useMemo(() => {
-    if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
-    return [...events, selectedEvent];
-  }, [events, selectedEvent]);
-
   const toggleCategory = useCallback((cat: EventCategory) => {
     setActiveCategories((prev) => {
       const next = new Set(prev);
       if (next.has(cat)) {
-        if (next.size > 1) next.delete(cat);
+        next.delete(cat);
       } else {
         next.add(cat);
       }
@@ -317,86 +281,35 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     });
   }, []);
 
-  const listTimelineSnaps = useMemo(() => {
-    const snaps: { label: string; time: Date }[] = [];
-    const now = new Date();
-    const endTime = new Date(now.getTime() + UPCOMING_BROWSER_HOURS * HOUR_MS);
-    snaps.push({ label: 'Now', time: now });
-
-    const dayNames = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
-    const todayStart = new Date(now);
-    todayStart.setHours(0, 0, 0, 0);
-    const firstSnap = new Date(now);
-    firstSnap.setMinutes(0, 0, 0);
-    firstSnap.setHours(firstSnap.getHours() + 1);
-
-    for (let d = new Date(firstSnap); d <= endTime; d = new Date(d.getTime() + HOUR_MS)) {
-      const daysFromToday = Math.floor((d.getTime() - todayStart.getTime()) / (24 * HOUR_MS));
-      const dayLabel = daysFromToday === 0 ? 'Today' : dayNames[d.getDay()];
-      const h = d.getHours();
-      const hour12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
-      const ampm = h < 12 ? 'AM' : 'PM';
-      snaps.push({ label: `${dayLabel} ${hour12}${ampm}`, time: d });
+  const dayOptions = useMemo(() => browseDays(now), [now]);
+  const selectedDay = dayOptions.find((option) => option.key === day) ?? dayOptions[0];
+  const isToday = selectedDay.key === dayOptions[0].key;
+  const timeChoice = time === 'now' && isToday ? 'now'
+    : typeof time === 'number' && selectedDay.hours.includes(time) ? time : 'all';
+  const selectedTime = timeChoice === 'now' ? now : timeChoice;
+  const timeOptions = hourOptions(selectedDay.hours);
+  const selectedEvent = allEvents.find((event) => event.id === selectedEventId);
+  const dayHeading = ['Today', 'Tomorrow'].includes(selectedDay.label) ? selectedDay.label.toLowerCase() : `on ${selectedDay.label}`;
+  const title = timeChoice === 'now' ? 'Happening now'
+    : `Events ${dayHeading}${selectedTime === 'all' ? '' : ` at ${timeLabel(selectedTime)}`}`;
+  const events = useMemo(() => allEvents.filter((event) =>
+    activeCategories.has(event.category) && matchesTime(event.startTime.toMillis(), event.endTime.toMillis(), selectedDay.key, selectedTime, now)
+  ).sort((a, b) => {
+    if (userLocation) {
+      const distance = (event: AppEvent) => getDistanceMiles(userLocation.lat, userLocation.lng, event.latitude, event.longitude);
+      const difference = distance(a) - distance(b);
+      if (difference) return difference;
     }
-    return snaps;
-  }, []);
+    return Math.max(a.startTime.toMillis(), now) - Math.max(b.startTime.toMillis(), now)
+      || a.endTime.toMillis() - b.endTime.toMillis();
+  }), [allEvents, activeCategories, selectedDay.key, selectedTime, now, userLocation]);
 
-  const listDayOptions = useMemo(() => {
-    const seen = new Set<string>();
-    const now = listTimelineSnaps[0].time;
-    return listTimelineSnaps.reduce<Array<{ key: string; label: string; firstIndex: number }>>(
-      (options, snap, index) => {
-        const key = getDateKey(snap.time);
-        if (!seen.has(key)) {
-          seen.add(key);
-          options.push({ key, label: formatBrowseDay(snap.time, now), firstIndex: index });
-        }
-        return options;
-      },
-      []
-    );
-  }, [listTimelineSnaps]);
-
-  const selectedListDayKey = getDateKey(listTimelineSnaps[listTimelineIndex].time);
-  const listTimeOptions = useMemo(() =>
-    listTimelineSnaps
-      .map((snap, index) => ({
-        index,
-        label: formatBrowseTime(snap.time, index === 0),
-        dayKey: getDateKey(snap.time),
-      }))
-      .filter((option) => option.dayKey === selectedListDayKey),
-    [listTimelineSnaps, selectedListDayKey]
-  );
-
-  const mapSelectedTime = listTimelineSnaps[listTimelineIndex].time.getTime();
-
-  const applyListTimeIndex = useCallback((index: number) => {
-    setListTimelineIndex(index);
-    setSelectedEvent(null);
-  }, []);
-
-  const listEvents = useMemo(() => {
-    const selectedTime = listTimelineSnaps[listTimelineIndex]?.time.getTime() ?? Date.now();
-    const filtered = allEvents.filter((event) =>
-      event.startTime.toMillis() <= selectedTime &&
-      event.endTime.toMillis() > selectedTime &&
-      activeCategories.has(event.category)
-    );
-    if (!userLocation) {
-      return filtered.sort((a, b) => a.startTime.toMillis() - b.startTime.toMillis());
-    }
-    return filtered.sort((a, b) =>
-      getDistanceMiles(userLocation.lat, userLocation.lng, a.latitude, a.longitude) -
-      getDistanceMiles(userLocation.lat, userLocation.lng, b.latitude, b.longitude)
-    );
-  }, [allEvents, activeCategories, listTimelineIndex, listTimelineSnaps, userLocation]);
-
-  // Subscribe to Firestore
-  useEffect(() => {
-    const unsubscribe = subscribeToUpcomingEvents(setAllEvents);
-    return () => unsubscribe();
-  }, []);
+  const retryFeed = () => { setFeedStatus('loading'); setFeedAttempt((attempt) => attempt + 1); };
+  const resetFilters = () => { setDay(null); setTime('all'); setActiveCategories(new Set(CATEGORY_KEYS)); };
+  useEffect(() => subscribeToUpcomingEvents((data) => {
+    setAllEvents(data);
+    setFeedStatus('ready');
+  }, () => setFeedStatus('error')), [feedAttempt]);
 
   useEffect(() => {
     const unsubscribe = subscribeToReports(setReports);
@@ -412,58 +325,106 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
     return () => unsubscribe();
   }, [selectedEvent?.id]);
 
-  // Filter by timeline and category
-  useEffect(() => {
-    const selectedTime = mapSelectedTime;
-    const filtered = allEvents.filter((event: any) => {
-      const started = event.startTime.toMillis() <= selectedTime;
-      const notEnded = event.endTime.toMillis() > selectedTime;
-      return started && notEnded && activeCategories.has(event.category);
-    });
-    setEvents(filtered);
-    setSelectedEvent((prev) => {
-      if (!prev) return null;
-      return filtered.find((e) => e.id === prev.id) ? prev : null;
-    });
-  }, [allEvents, mapSelectedTime, activeCategories]);
-
-  const resetMapTime = () => {
-    applyListTimeIndex(0);
-    setMapTimePickerOpen(false);
-  };
-
-  if (!isLoaded) {
-    return <div style={styles.loading}>Loading map...</div>;
-  }
-
   return (
-    <div style={styles.container}>
+    <div className="pulse-app">
+      <header className="site-header">
+        <div className="header-inner">
+          <div className="wordmark"><span className="pulse-dot" aria-hidden="true" />Pulse</div>
+          <div className="view-switch" role="group" aria-label="Event view">
+            <button aria-pressed={showListView} onClick={() => selectView(true)}>List</button>
+            <button aria-pressed={!showListView} onClick={() => selectView(false)}>Map</button>
+          </div>
+          <div className="account">
+            {user ? (
+              <>
+                <button className="account-button account-avatar" aria-label="Account" aria-expanded={showProfileMenu} onClick={() => setShowProfileMenu((value) => !value)}>
+                  {user.photoURL ? <img src={user.photoURL} alt="" referrerPolicy="no-referrer" /> : (user.displayName || user.email || '?')[0].toUpperCase()}
+                </button>
+                {showProfileMenu && (
+                  <div className="account-menu" onKeyDown={(event) => { if (event.key === 'Escape') {
+                    event.currentTarget.parentElement?.querySelector('button')?.focus();
+                    setShowProfileMenu(false);
+                  } }}>
+                    <a href="/privacy">Privacy policy</a>
+                    <button onClick={() => { setShowProfileMenu(false); signOut().catch(() => alert('Could not sign out. Please try again.')); }}>Sign out</button>
+                    <button className="danger" onClick={() => {
+                      if (confirm('Delete your account? This will permanently remove all your data and cannot be undone.')) {
+                        setShowProfileMenu(false);
+                        deleteAccount().catch((error) => alert(error.message || 'Failed to delete account'));
+                      }
+                    }}>Delete account</button>
+                  </div>
+                )}
+              </>
+            ) : <button className="account-button" onClick={handleSignIn}>Sign in</button>}
+          </div>
+        </div>
+      </header>
+      {signInError && !selectedEvent && <p className="notice" role="alert">Could not sign in with Google. Allow pop-ups and try again.</p>}
+      <main className="browse-main">
+        <section className="browse-intro" aria-labelledby="browse-title">
+          <p className="eyebrow">NEW YORK CITY</p>
+          <h1 id="browse-title">{title}</h1>
+          <div className="browse-toolbar">
+            <label className="field">Day<select value={selectedDay.key} onChange={(event) => { setDay(event.target.value); setTime('all'); }}>
+              {dayOptions.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+            </select></label>
+            <label className="field">Time (NYC)<select value={timeChoice} onChange={(event) => {
+              const value = event.target.value;
+              setTime(value === 'all' || value === 'now' ? value : Number(value));
+            }}>
+              <option value="all">{selectedDay === dayOptions[0] ? 'Rest of today' : 'All day'}</option>
+              {selectedDay === dayOptions[0] && <option value="now">Now</option>}
+              {timeOptions.map((option) => <option key={option.hour} value={option.hour}>{option.label}</option>)}
+            </select></label>
+            <button className="secondary-button filter-toggle" aria-expanded={filtersOpen} aria-controls="event-filters" onClick={() => setFiltersOpen((value) => !value)}>
+              Filters{activeCategories.size !== CATEGORY_KEYS.length && <span className="filter-count">{activeCategories.size}</span>}
+            </button>
+          </div>
+          <div id="event-filters" className="filter-panel" hidden={!filtersOpen}>
+            <div className="filter-options" role="group" aria-label="Event categories">
+              {CATEGORY_KEYS.map((key) => <button className="category-filter" key={key} aria-pressed={activeCategories.has(key)} onClick={() => toggleCategory(key)}>
+                <span aria-hidden="true">{CATEGORIES[key].emoji}</span>{CATEGORIES[key].label}
+              </button>)}
+            </div>
+            <div className="filter-actions">
+              <button className="text-button" onClick={() => setActiveCategories(new Set(CATEGORY_KEYS))}>Select all</button>
+              <button className="text-button" onClick={() => setActiveCategories(new Set())}>Clear categories</button>
+              <button className="text-button" aria-pressed={!!userLocation} disabled={locationStatus === 'loading'} onClick={toggleNearby}>
+                {locationStatus === 'loading' ? 'Finding location…' : userLocation ? 'Stop sorting by distance' : 'Sort by distance'}
+              </button>
+              {locationStatus === 'error' && <p role="status">Location unavailable. Events are sorted by time.</p>}
+            </div>
+          </div>
+        </section>
+        {mapVisited && <section aria-label="Event map" className="map-frame" hidden={showListView}>
+          <MapSurface showList={() => selectView(true)}>
       <GoogleMap
         mapContainerStyle={styles.map}
+        mapContainerClassName="google-map"
         center={NYC_CENTER}
         zoom={13}
         onLoad={(map) => { mapInstanceRef.current = map; }}
+        onUnmount={() => { mapInstanceRef.current = null; }}
         onClick={(e) => {
           if (pinDropMode && e.latLng) {
             setPendingPin({ lat: e.latLng.lat(), lng: e.latLng.lng() });
             setPinDropMode(false);
             return;
           }
-          setSelectedEvent(null);
+          setSelectedEventId(null);
           setSelectedReport(null);
-          setMapTimePickerOpen(false);
-          setFiltersOpen(false);
           setShowProfileMenu(false);
-          setShowListView(false);
         }}
         options={{
           styles: MAP_STYLE,
           disableDefaultUI: true,
-          zoomControl: false,
+          zoomControl: true,
+          gestureHandling: 'cooperative',
           draggableCursor: pinDropMode ? 'crosshair' : undefined,
         }}
       >
-        {eventsForMap.map((event) => {
+        {events.map((event) => {
           const category = CATEGORIES[event.category];
           return (
             <OverlayViewF
@@ -471,11 +432,10 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
               position={{ lat: event.latitude, lng: event.longitude }}
               mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
             >
-              <div
-                style={styles.markerWrapper}
+              <button type="button" className="marker-button" style={styles.markerWrapper} aria-label={event.title}
                 onClick={(e) => {
                   e.stopPropagation();
-                  setSelectedEvent(event);
+                  setSelectedEventId(event.id);
                   setSelectedReport(null);
                   const bounds = mapInstanceRef.current?.getBounds();
                   if (bounds) {
@@ -498,12 +458,12 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   <span style={styles.markerEmoji}>{category.emoji}</span>
                 </div>
                 <div style={{ ...styles.markerArrow, borderTopColor: category.color }} />
-              </div>
+              </button>
             </OverlayViewF>
           );
         })}
         {/* Report pins */}
-        {reports.filter((r) => !hiddenMap[r.id]).map((report) => {
+        {reports.filter((r) => !hiddenMap[r.id] && r.expiresAt.toMillis() > now).map((report) => {
           const cat = REPORT_CATEGORIES[report.category] || REPORT_CATEGORIES.other;
           return (
             <OverlayViewF
@@ -511,19 +471,18 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
               position={{ lat: report.latitude, lng: report.longitude }}
               mapPaneName={OverlayView.OVERLAY_MOUSE_TARGET}
             >
-              <div
-                style={styles.markerWrapper}
+              <button type="button" className="marker-button" style={styles.markerWrapper} aria-label={report.text}
                 onClick={(e) => {
                   e.stopPropagation();
                   setSelectedReport(report);
-                  setSelectedEvent(null);
+                  setSelectedEventId(null);
                 }}
               >
                 <div style={{ ...styles.reportMarker, borderColor: cat.color }}>
                   <span style={styles.markerEmoji}>{cat.emoji}</span>
                 </div>
                 <div style={{ ...styles.markerArrow, borderTopColor: cat.color }} />
-              </div>
+              </button>
             </OverlayViewF>
           );
         })}
@@ -543,130 +502,82 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
         )}
       </GoogleMap>
 
-      {/* Logo + user */}
-      <div style={styles.logo}>
-        <div style={styles.logoDot} />
-        <span style={styles.logoText}>Pulse</span>
-        {user ? (
-          <div style={styles.profileWrapper}>
-            <div
-              style={styles.userAvatar}
-              onClick={() => setShowProfileMenu((v) => !v)}
-              title={user.email || 'Account'}
-            >
-              {user.photoURL ? (
-                <img src={user.photoURL} style={styles.userAvatarImg} referrerPolicy="no-referrer" />
-              ) : (
-                <span style={styles.userAvatarText}>
-                  {(user.displayName || user.email || '?')[0].toUpperCase()}
-                </span>
-              )}
-            </div>
-            {showProfileMenu && (
-              <div style={styles.profileMenu}>
-                <a href="/privacy" style={styles.profileMenuItem}>Privacy Policy</a>
-                <div
-                  style={styles.profileMenuItem}
-                  onClick={() => { setShowProfileMenu(false); signOut(); }}
-                >
-                  Sign out
-                </div>
-                <div
-                  style={{ ...styles.profileMenuItem, color: '#ff4444', borderBottom: 'none' }}
-                  onClick={() => {
-                    if (confirm('Delete your account? This will permanently remove all your data and cannot be undone.')) {
-                      setShowProfileMenu(false);
-                      deleteAccount().catch((e) => alert(e.message || 'Failed to delete account'));
-                    }
-                  }}
-                >
-                  Delete Account
-                </div>
-              </div>
-            )}
+          </MapSurface>
+        </section>}
+        {feedStatus !== 'ready' ? (
+          <div className="empty-state">
+            <p role="status">{feedStatus === 'loading' ? 'Loading NYC events…' : 'Could not load events.'}</p>
+            {feedStatus === 'error' && <button className="secondary-button" onClick={retryFeed}>Try again</button>}
           </div>
-        ) : (
-          <div
-            style={styles.signInButton}
-            onClick={async () => {
-              try { await signInWithGoogle(); } catch {}
-            }}
-          >
-            Sign in
-          </div>
-        )}
-      </div>
-
-      {/* Privacy link (bottom corner, always visible) */}
-      <a href="/privacy" style={styles.privacyCorner}>Privacy</a>
-
-      {/* Category filter toggle + pills */}
-      <div style={styles.filterContainer}>
-        <div
-          style={styles.filterToggle}
-          onClick={() => setFiltersOpen((v) => !v)}
-        >
-          {filtersOpen ? (
-            <span style={styles.filterToggleIcon}>✕</span>
-          ) : (
-            <div style={styles.layersIcon}>
-              <div style={styles.layersDiamond} />
-              <div style={{ ...styles.layersDiamond, ...styles.layersDiamondMid }} />
-              <div style={{ ...styles.layersDiamond, ...styles.layersDiamondBack }} />
+        ) : <>
+          <p className="result-count" role="status">{events.length} {events.length === 1 ? 'event' : 'events'}{userLocation ? ' · sorted by distance' : ''}</p>
+          {events.length === 0 ? (
+            <div className="empty-state">
+              <strong>No matching events</strong>
+              <p>Try another day or time, or reset your filters.</p>
+              <button className="secondary-button" onClick={resetFilters}>Reset filters</button>
             </div>
-          )}
-        </div>
-        {filtersOpen && (
-          <div style={styles.filterColumn}>
-            {(Object.keys(CATEGORIES) as EventCategory[]).map((key, i) => {
-              const cat = CATEGORIES[key];
-              const active = activeCategories.has(key);
-              return (
-                <div
-                  key={key}
-                  style={{
-                    ...styles.filterPill,
-                    backgroundColor: active ? cat.color : 'rgba(30, 30, 30, 0.5)',
-                    opacity: active ? 1 : 0.5,
-                    animation: `filter-in 0.2s ease-out ${i * 0.03}s both`,
-                  }}
-                  onClick={() => toggleCategory(key)}
-                >
-                  <span style={styles.filterEmoji}>{cat.emoji}</span>
-                </div>
-              );
+          ) : showListView && <ul className="event-list">
+            {events.map((event) => {
+              const category = CATEGORIES[event.category];
+              const started = event.startTime.toMillis() <= now;
+              const currentDay = selectedDay.key === dateKey(now);
+              const startsOnDay = selectedDay.key === dateKey(event.startTime.toMillis());
+              const endsOnDay = selectedDay.key === dateKey(event.endTime.toMillis());
+              const when = started && currentDay ? 'Happening now'
+                : startsOnDay ? `Starts ${timeLabel(event.startTime.toMillis())}`
+                : endsOnDay ? `Ends ${timeLabel(event.endTime.toMillis())}` : 'Ongoing';
+              const miles = userLocation && getDistanceMiles(userLocation.lat, userLocation.lng, event.latitude, event.longitude);
+              return <li key={event.id}>
+                <button className="event-row" onClick={() => { setSignInError(false); setSelectedEventId(event.id); }}>
+                  <span className="event-icon" style={{ backgroundColor: category.backgroundColor }} aria-hidden="true">{category.emoji}</span>
+                  <span className="event-summary">
+                    <span className="event-kicker">{category.label} · {when}</span>
+                    <span className="event-title">{event.title}</span>
+                    {event.location && <span className="event-location">{event.location}</span>}
+                    {miles !== null && Number.isFinite(miles) && <span className="event-location">{miles < 0.1 ? '< 0.1' : miles.toFixed(1)} mi</span>}
+                  </span>
+                  <span className="event-chevron" aria-hidden="true">›</span>
+                </button>
+              </li>;
             })}
-          </div>
-        )}
-      </div>
+          </ul>}
+        </>}
+      </main>
+      <footer className="site-footer"><a href="/privacy">Privacy policy</a></footer>
 
       {/* Event preview card */}
       {selectedEvent && (
-        <div style={styles.previewCard}>
+        <PanelDialog titleId="event-detail-title" close={() => setSelectedEventId(null)}>
+          <div className="detail-toolbar">
+            <span>{CATEGORIES[selectedEvent.category].label}</span>
+            <button type="button" aria-label="Close details" className="close-button" autoFocus onClick={() => setSelectedEventId(null)}>×</button>
+          </div>
           {user?.email === ADMIN_EMAIL && !selectedEvent.sourceUrl && !(selectedEvent.sourceUrls?.length) && (
-            <div
-              style={styles.adminDelete}
+            <button type="button"
+              className="admin-delete"
+              aria-label="Delete this listing"
               onClick={(e) => {
                 e.stopPropagation();
                 if (confirm(`Delete "${selectedEvent.title}"?`)) {
                   deleteEvent(selectedEvent.id);
-                  setSelectedEvent(null);
+                  setSelectedEventId(null);
                 }
               }}
-            >✕</div>
+            >Delete</button>
           )}
           <div style={styles.previewContent}>
             <span style={styles.previewEmoji}>
               {CATEGORIES[selectedEvent.category]?.emoji}
             </span>
             <div style={styles.previewText}>
-              <div style={styles.previewTitle}>{selectedEvent.title}</div>
+              <h2 id="event-detail-title" className="detail-title">{selectedEvent.title}</h2>
               {selectedEvent.location && (
-                <div style={styles.previewLocation}>{selectedEvent.location}</div>
+                <div className="detail-location">{selectedEvent.location}</div>
               )}
               <div style={styles.previewMeta}>
                 <span>
-                  {formatTime(selectedEvent.startTime.toMillis())} — {formatTime(selectedEvent.endTime.toMillis())}
+                  {eventTimeLabel(selectedEvent.startTime.toMillis(), now)} — {eventTimeLabel(selectedEvent.endTime.toMillis(), now)} NYC
                 </span>
                 {userLocation && (() => {
                   const miles = getDistanceMiles(userLocation.lat, userLocation.lng, selectedEvent.latitude, selectedEvent.longitude);
@@ -677,42 +588,40 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
             </div>
           </div>
           {selectedEvent.description && (
-            <div style={styles.previewDescription}>{selectedEvent.description}</div>
+            <div className="detail-description">{selectedEvent.description}</div>
           )}
           {(() => {
-            const urls = selectedEvent.sourceUrls?.length
-              ? selectedEvent.sourceUrls
-              : selectedEvent.sourceUrl
-                ? [selectedEvent.sourceUrl]
-                : [];
+            const urls = [...new Set([selectedEvent.sourceUrl, ...(selectedEvent.sourceUrls ?? [])])].flatMap((url) => {
+              if (!url) return [];
+              try { const parsed = new URL(url); return ['http:', 'https:'].includes(parsed.protocol) ? [parsed] : []; }
+              catch { return []; }
+            });
             return urls.length > 0 ? (
               <div style={styles.sourceLinks}>
-                {urls.map((url, i) => (
+                {urls.map((url) => (
                   <a
-                    key={i}
-                    href={url}
+                    key={url.href}
+                    href={url.href}
                     target="_blank"
                     rel="noopener noreferrer"
                     style={styles.sourceLink}
                     onClick={(e) => e.stopPropagation()}
                   >
-                    {(() => {
-                      try { return new URL(url).hostname.replace('www.', ''); }
-                      catch { return url; }
-                    })()}
+                    {url.hostname.replace(/^www\./, '')}
                     {' '}→
                   </a>
                 ))}
               </div>
             ) : null;
           })()}
-          {selectedEvent.startTime.toMillis() > Date.now() ? (
+          {selectedEvent.startTime.toMillis() > now ? (
             <div style={styles.cardActions}>
               <button
                 style={{
                   ...styles.interestedButton,
                   ...(interestedMap[selectedEvent.id] ? styles.interestedButtonActive : {}),
                 }}
+                aria-pressed={!!interestedMap[selectedEvent.id]}
                 onClick={(e) => { e.stopPropagation(); handleInterested(selectedEvent); }}
               >
                 <span>{interestedMap[selectedEvent.id] ? '⭐' : '☆'}</span>
@@ -733,6 +642,8 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   ...styles.voteButton,
                   ...(votes[selectedEvent.id] === 'up' ? styles.voteButtonUp : {}),
                 }}
+                aria-label={`Thumbs up: ${selectedEvent.thumbsUp ?? 0}`}
+                aria-pressed={votes[selectedEvent.id] === 'up'}
                 onClick={(e) => { e.stopPropagation(); handleVote(selectedEvent, 'up'); }}
               >
                 <span>👍</span>
@@ -746,6 +657,8 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   ...styles.voteButton,
                   ...(votes[selectedEvent.id] === 'down' ? styles.voteButtonDown : {}),
                 }}
+                aria-label={`Thumbs down: ${selectedEvent.thumbsDown ?? 0}`}
+                aria-pressed={votes[selectedEvent.id] === 'down'}
                 onClick={(e) => { e.stopPropagation(); handleVote(selectedEvent, 'down'); }}
               >
                 <span>👎</span>
@@ -785,10 +698,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                         })()}
                       </span>
                       {(!user || c.userId !== user.uid) && (
-                        <span
-                          style={styles.flagButton}
-                          onClick={(e) => { e.stopPropagation(); setFlagMenuTarget({ type: 'comment', id: c.id, eventId: selectedEvent?.id }); }}
-                        >⚑</span>
+                        <button className="flag-button" aria-label="Report comment" onClick={() => setFlagMenuTarget({ type: 'comment', id: c.id, eventId: selectedEvent.id })}>⚑</button>
                       )}
                     </div>
                   </div>
@@ -799,7 +709,8 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
               <div style={styles.commentInputRow}>
                 <input
                   style={styles.commentInput}
-                  placeholder="Add a comment..."
+                  placeholder="Add a comment…"
+                  aria-label="Add a comment"
                   value={commentText}
                   onChange={(e) => setCommentText(e.target.value)}
                   maxLength={280}
@@ -823,6 +734,7 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                     ...styles.commentSend,
                     opacity: commentText.trim() && !submittingComment ? 1 : 0.4,
                   }}
+                  aria-label="Post comment"
                   disabled={!commentText.trim() || submittingComment}
                   onClick={() => {
                     if (!commentText.trim()) return;
@@ -841,93 +753,12 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                 </button>
               </div>
             ) : (
-              <div
-                style={styles.commentSignIn}
-                onClick={() => signInWithGoogle().catch(() => {})}
-              >
-                Sign in to comment
-              </div>
+              <button className="text-button comment-sign-in" onClick={handleSignIn}>Sign in to comment</button>
             )}
           </div>
-        </div>
+          {signInError && <p className="notice" role="alert">Could not sign in with Google. Allow pop-ups and try again.</p>}
+        </PanelDialog>
       )}
-
-      {!showListView && (
-        <>
-          <div
-            style={styles.mapTimeButton}
-            onClick={() => setMapTimePickerOpen((open) => !open)}
-          >
-            <div>
-              <div style={styles.mapTimeLabel}>WHEN</div>
-              <div style={styles.mapTimeValue}>
-                {listTimelineIndex === 0 ? 'Now' : formatTime(mapSelectedTime)}
-              </div>
-            </div>
-            <span style={styles.mapTimeChevron}>⌄</span>
-          </div>
-          {mapTimePickerOpen && (
-            <div style={styles.mapTimePanel} onClick={(event) => event.stopPropagation()}>
-              <div style={styles.mapTimePanelTitle}>Choose date and time</div>
-              <div style={styles.mapTimePanelSubtitle}>Show events happening at a specific time.</div>
-              <div style={styles.listTimeControls}>
-                <label style={styles.listSelectField}>
-                  <span style={styles.listSelectLabel}>Day</span>
-                  <select
-                    aria-label="Choose day"
-                    style={styles.listSelect}
-                    value={selectedListDayKey}
-                    onChange={(event) => {
-                      const option = listDayOptions.find((day) => day.key === event.target.value);
-                      if (option) applyListTimeIndex(option.firstIndex);
-                    }}
-                  >
-                    {listDayOptions.map((option) => (
-                      <option key={option.key} value={option.key}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-                <label style={styles.listSelectField}>
-                  <span style={styles.listSelectLabel}>Time</span>
-                  <select
-                    aria-label="Choose time"
-                    style={styles.listSelect}
-                    value={listTimelineIndex}
-                    onChange={(event) => applyListTimeIndex(Number(event.target.value))}
-                  >
-                    {listTimeOptions.map((option) => (
-                      <option key={option.index} value={option.index}>{option.label}</option>
-                    ))}
-                  </select>
-                </label>
-              </div>
-              <div style={styles.mapTimePanelActions}>
-                {listTimelineIndex !== 0 && (
-                  <button style={styles.mapTimeNowButton} onClick={resetMapTime}>Back to now</button>
-                )}
-                <button
-                  style={styles.mapTimeDoneButton}
-                  onClick={() => setMapTimePickerOpen(false)}
-                >
-                  Done
-                </button>
-              </div>
-            </div>
-          )}
-        </>
-      )}
-
-      {/* List toggle button */}
-      <div
-        style={styles.listToggleButton}
-        onClick={() => {
-          setMapTimePickerOpen(false);
-          if (!showListView) setSelectedEvent(null);
-          setShowListView((visible) => !visible);
-        }}
-      >
-        <span style={styles.listToggleText}>{showListView ? '✕' : '☰'}</span>
-      </div>
 
       {/* Pin drop mode banner */}
       {pinDropMode && (
@@ -1013,10 +844,15 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
 
       {/* Selected report card */}
       {selectedReport && (
-        <div style={styles.previewCard}>
+        <PanelDialog titleId="report-detail-title" close={() => setSelectedReport(null)}>
+          <div className="detail-toolbar">
+            <span>Community report</span>
+            <button aria-label="Close report" className="close-button" autoFocus onClick={() => setSelectedReport(null)}>×</button>
+          </div>
           {user?.email === ADMIN_EMAIL && (
-            <div
-              style={styles.adminDelete}
+            <button type="button"
+              className="admin-delete"
+              aria-label="Delete this listing"
               onClick={(e) => {
                 e.stopPropagation();
                 if (confirm(`Delete this report?`)) {
@@ -1024,14 +860,14 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
                   setSelectedReport(null);
                 }
               }}
-            >✕</div>
+            >Delete</button>
           )}
           <div style={styles.previewContent}>
             <span style={styles.previewEmoji}>
               {REPORT_CATEGORIES[selectedReport.category]?.emoji || '📍'}
             </span>
             <div style={styles.previewText}>
-              <div style={styles.previewTitle}>{selectedReport.text}</div>
+              <h2 id="report-detail-title" className="detail-title">{selectedReport.text}</h2>
               <div style={styles.previewMeta}>
                 <span>
                   {selectedReport.userName} · {(() => {
@@ -1076,145 +912,16 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
               </span>
             </button>
             {(!user || selectedReport.userId !== user.uid) && (
-              <span
-                style={styles.flagButton}
-                onClick={(e) => { e.stopPropagation(); setFlagMenuTarget({ type: 'report', id: selectedReport.id }); }}
-              >⚑</span>
+              <button className="flag-button" aria-label="Report this pin" onClick={() => setFlagMenuTarget({ type: 'report', id: selectedReport.id })}>⚑</button>
             )}
           </div>
-        </div>
+        </PanelDialog>
       )}
 
-      {/* Point-in-time event list with a 72-hour time picker */}
-      {showListView && (
-        <div style={styles.listPanel}>
-          <div style={styles.listHeader}>
-            <span style={styles.listTitle}>
-              {listTimelineIndex === 0 ? 'Happening now' : `Happening ${listTimelineSnaps[listTimelineIndex]?.label}`}
-            </span>
-            <span style={styles.listSubtitle}>Choose any time in the next 3 days</span>
-          </div>
-          <div style={styles.listTimeControls}>
-            <label style={styles.listSelectField}>
-              <span style={styles.listSelectLabel}>Day</span>
-              <select
-                aria-label="Choose day"
-                style={styles.listSelect}
-                value={selectedListDayKey}
-                onChange={(event) => {
-                  const option = listDayOptions.find((day) => day.key === event.target.value);
-                  if (option) applyListTimeIndex(option.firstIndex);
-                }}
-              >
-                {listDayOptions.map((option) => (
-                  <option key={option.key} value={option.key}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-            <label style={styles.listSelectField}>
-              <span style={styles.listSelectLabel}>Time</span>
-              <select
-                aria-label="Choose time"
-                style={styles.listSelect}
-                value={listTimelineIndex}
-                onChange={(event) => applyListTimeIndex(Number(event.target.value))}
-              >
-                {listTimeOptions.map((option) => (
-                  <option key={option.index} value={option.index}>{option.label}</option>
-                ))}
-              </select>
-            </label>
-          </div>
-          <div style={styles.listScroll}>
-            {listEvents.length === 0 ? (
-              <div style={styles.listEmpty}>No events are happening at this time.</div>
-            ) : listEvents.map((event) => {
-              const category = CATEGORIES[event.category];
-              if (!category) return null;
-              const dist = userLocation
-                ? getDistanceMiles(userLocation.lat, userLocation.lng, event.latitude, event.longitude)
-                : null;
-              const distLabel = dist !== null
-                ? dist < 0.1 ? '< 0.1 mi' : dist < 10 ? `${dist.toFixed(1)} mi` : `${Math.round(dist)} mi`
-                : null;
-              return (
-                <div
-                  key={event.id}
-                  style={styles.listItem}
-                  onClick={() => {
-                    setSelectedEvent(event);
-                    setShowListView(false);
-                    setTimeout(() => {
-                      mapInstanceRef.current?.panTo({ lat: event.latitude, lng: event.longitude });
-                      mapInstanceRef.current?.setZoom(15);
-                    }, 50);
-                  }}
-                >
-                  <div style={{ ...styles.listItemDot, backgroundColor: category.color }}>
-                    <span style={styles.listItemEmoji}>{category.emoji}</span>
-                  </div>
-                  <div style={styles.listItemContent}>
-                    <div style={styles.listItemTitle}>{event.title}</div>
-                    {event.location && (
-                      <div style={styles.listItemLocation}>{event.location}</div>
-                    )}
-                    <div style={styles.listItemMeta}>
-                      {formatTime(event.startTime.toMillis())}
-                      {distLabel && (
-                        <span style={styles.listItemDistance}> · {distLabel}</span>
-                      )}
-                    </div>
-                  </div>
-                  {(event.interested ?? 0) > 0 && (
-                    <span style={styles.listItemInterested}>⭐ {event.interested}</span>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
-
-      {/* Welcome modal */}
-      {showWelcome && (
-        <div style={styles.welcomeBackdrop}>
-          <div style={styles.welcomeModal}>
-            <div style={styles.welcomeHeader}>
-              <div style={styles.welcomeDot} />
-              <span style={styles.welcomeTitle}>Pulse</span>
-            </div>
-            <p style={styles.welcomeSubtitle}>
-              What's happening in NYC right now
-            </p>
-            <div style={styles.welcomeCategories}>
-              {(Object.keys(CATEGORIES) as EventCategory[]).map((key) => {
-                const cat = CATEGORIES[key];
-                return (
-                  <div key={key} style={styles.welcomeRow}>
-                    <div style={{ ...styles.welcomeSwatch, backgroundColor: cat.color }}>
-                      <span style={styles.welcomeSwatchEmoji}>{cat.emoji}</span>
-                    </div>
-                    <span style={styles.welcomeLabel}>{cat.label}</span>
-                  </div>
-                );
-              })}
-            </div>
-            <button
-              style={styles.welcomeButton}
-              onClick={() => {
-                localStorage.setItem(WELCOME_KEY, '1');
-                setShowWelcome(false);
-              }}
-            >
-              Explore
-            </button>
-          </div>
-        </div>
-      )}
       {flagMenuTarget && (
-        <div style={styles.flagOverlay} onClick={() => setFlagMenuTarget(null)}>
-          <div style={styles.flagMenu} onClick={(e) => e.stopPropagation()}>
-            <div style={styles.flagMenuTitle}>Why are you reporting this?</div>
+        <PanelDialog titleId="flag-dialog-title" close={() => setFlagMenuTarget(null)} className="flag-dialog">
+          <div style={styles.flagMenu}>
+            <h2 id="flag-dialog-title" style={styles.flagMenuTitle}>Why are you reporting this?</h2>
             {([
               { value: 'spam' as FlagReason, label: 'Spam' },
               { value: 'inappropriate' as FlagReason, label: 'Inappropriate' },
@@ -1227,64 +934,17 @@ function AppContent({ user, displayName }: { user: User | null; displayName: str
             ))}
             <button style={styles.flagMenuCancel} onClick={() => setFlagMenuTarget(null)}>Cancel</button>
           </div>
-        </div>
+        </PanelDialog>
       )}
     </div>
   );
 }
 
 const styles: Record<string, React.CSSProperties> = {
-  authScreen: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#111',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  authSpinner: {
-    width: 32,
-    height: 32,
-    border: '3px solid rgba(255,255,255,0.2)',
-    borderTopColor: '#fff',
-    borderRadius: '50%',
-    animation: 'spin 0.8s linear infinite',
-  },
-  authContent: {
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    padding: 32,
-  },
-  authHeader: {
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 10,
-    marginBottom: 8,
-  },
-  authDot: {
-    width: 14,
-    height: 14,
-    borderRadius: 7,
-    backgroundColor: '#ff5252',
-    animation: 'pulse-dot 2s ease-in-out infinite',
-  },
-  authTitle: {
-    color: '#fff',
-    fontSize: 48,
-    fontWeight: 700,
-    letterSpacing: -1,
-  },
   authSubtitle: {
     color: 'rgba(255,255,255,0.5)',
     fontSize: 18,
     marginBottom: 40,
-  },
-  authError: {
-    color: '#ff6b6b',
-    fontSize: 14,
-    marginBottom: 16,
   },
   nameInput: {
     width: '100%',
@@ -1296,37 +956,13 @@ const styles: Record<string, React.CSSProperties> = {
     color: '#fff',
     outline: 'none',
     fontFamily: 'inherit',
-    textAlign: 'center' as any,
+    textAlign: 'center',
   },
   nameError: {
     color: '#ff6b6b',
     fontSize: 13,
     marginTop: 8,
     marginBottom: 0,
-  },
-  authGoogleButton: {
-    backgroundColor: '#fff',
-    color: '#333',
-    border: 'none',
-    borderRadius: 12,
-    padding: '14px 32px',
-    fontSize: 17,
-    fontWeight: 600,
-    cursor: 'pointer',
-    minWidth: 240,
-  },
-  container: {
-    width: '100%',
-    height: '100%',
-    position: 'relative',
-  },
-  loading: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '100%',
-    fontSize: 18,
-    color: '#999',
   },
   map: {
     width: '100%',
@@ -1360,34 +996,6 @@ const styles: Record<string, React.CSSProperties> = {
     borderTop: '8px solid',
     marginTop: -2,
   },
-  previewCard: {
-    position: 'absolute',
-    top: 16,
-    left: 16,
-    right: 16,
-    maxWidth: 420,
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-    overflow: 'hidden',
-  },
-  adminDelete: {
-    position: 'absolute' as any,
-    top: 8,
-    right: 8,
-    width: 24,
-    height: 24,
-    borderRadius: 12,
-    backgroundColor: '#ff4444',
-    color: '#fff',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: 'pointer',
-    zIndex: 1,
-  },
   previewContent: {
     display: 'flex',
     flexDirection: 'row',
@@ -1401,23 +1009,6 @@ const styles: Record<string, React.CSSProperties> = {
   previewText: {
     flex: 1,
     minWidth: 0,
-  },
-  previewTitle: {
-    fontSize: 17,
-    fontWeight: 700,
-    color: '#1a1a1a',
-    marginBottom: 2,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  previewLocation: {
-    fontSize: 14,
-    color: '#666',
-    marginBottom: 2,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
   },
   previewMeta: {
     fontSize: 13,
@@ -1498,261 +1089,6 @@ const styles: Record<string, React.CSSProperties> = {
   voteCountActive: {
     color: '#fff',
   },
-  previewDescription: {
-    padding: '0 16px 16px',
-    fontSize: 14,
-    lineHeight: '20px',
-    color: '#444',
-  },
-  mapTimeButton: {
-    position: 'absolute',
-    bottom: 16,
-    left: 16,
-    minWidth: 150,
-    minHeight: 48,
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    backgroundColor: 'rgba(30, 30, 30, 0.9)',
-    borderRadius: 16,
-    padding: '8px 13px',
-    boxShadow: '0 2px 8px rgba(0,0,0,0.25)',
-    cursor: 'pointer',
-    zIndex: 3,
-  },
-  mapTimeLabel: {
-    color: '#7db1ff',
-    fontSize: 9,
-    fontWeight: 800,
-    letterSpacing: '1px',
-    marginBottom: 2,
-  },
-  mapTimeValue: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 700,
-    whiteSpace: 'nowrap',
-  },
-  mapTimeChevron: {
-    color: '#fff',
-    fontSize: 18,
-    marginLeft: 12,
-  },
-  mapTimePanel: {
-    position: 'absolute',
-    bottom: 74,
-    left: 16,
-    width: 340,
-    maxWidth: 'calc(100% - 32px)',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    boxShadow: '0 4px 18px rgba(0,0,0,0.2)',
-    overflow: 'hidden',
-    zIndex: 60,
-  },
-  mapTimePanelTitle: {
-    fontSize: 20,
-    fontWeight: 700,
-    color: '#1a1a1a',
-    padding: '18px 18px 2px',
-  },
-  mapTimePanelSubtitle: {
-    fontSize: 12,
-    color: '#777',
-    padding: '0 18px 8px',
-  },
-  mapTimePanelActions: {
-    display: 'flex',
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    gap: 10,
-    padding: '12px 14px 14px',
-  },
-  mapTimeNowButton: {
-    border: 0,
-    borderRadius: 10,
-    padding: '9px 13px',
-    backgroundColor: '#f0f0f0',
-    color: '#444',
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: 'pointer',
-  },
-  mapTimeDoneButton: {
-    border: 0,
-    borderRadius: 10,
-    padding: '9px 16px',
-    backgroundColor: '#1a1a1a',
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 700,
-    cursor: 'pointer',
-  },
-  filterContainer: {
-    position: 'absolute',
-    top: 62,
-    right: 16,
-    display: 'flex',
-    flexDirection: 'column',
-    alignItems: 'center',
-    gap: 6,
-    zIndex: 1,
-  },
-  filterToggle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    cursor: 'pointer',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-  },
-  filterToggleActive: {
-    backgroundColor: 'rgba(42, 124, 255, 0.85)',
-  },
-  filterToggleIcon: {
-    color: '#fff',
-    fontSize: 14,
-    fontWeight: 700,
-  },
-  layersIcon: {
-    width: 18,
-    height: 18,
-    position: 'relative' as const,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  layersDiamond: {
-    position: 'absolute' as const,
-    width: 10,
-    height: 10,
-    transform: 'rotate(45deg)',
-    border: '1.5px solid rgba(255, 255, 255, 0.9)',
-    borderRadius: 1,
-    top: 1,
-  },
-  layersDiamondMid: {
-    top: 4,
-    opacity: 0.7,
-  },
-  layersDiamondBack: {
-    top: 7,
-    opacity: 0.4,
-  },
-  filterColumn: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 6,
-  },
-  filterPill: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    cursor: 'pointer',
-    border: '2px solid #fff',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.2)',
-    transition: 'opacity 0.2s',
-  },
-  filterEmoji: {
-    fontSize: 16,
-  },
-  logo: {
-    position: 'absolute',
-    top: 16,
-    right: 16,
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    borderRadius: 20,
-    padding: '8px 14px 8px 10px',
-    pointerEvents: 'auto' as any,
-  },
-  logoDot: {
-    width: 10,
-    height: 10,
-    borderRadius: 5,
-    backgroundColor: '#ff5252',
-    animation: 'pulse-dot 2s ease-in-out infinite',
-  },
-  logoText: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: 700,
-    letterSpacing: 0.5,
-  },
-  profileWrapper: {
-    position: 'relative' as const,
-    marginLeft: 4,
-  },
-  profileMenu: {
-    position: 'absolute' as const,
-    top: 34,
-    right: 0,
-    backgroundColor: '#1a1a1a',
-    borderRadius: 10,
-    boxShadow: '0 4px 16px rgba(0,0,0,0.3)',
-    overflow: 'hidden',
-    minWidth: 140,
-    zIndex: 100,
-  },
-  profileMenuItem: {
-    display: 'block',
-    padding: '10px 16px',
-    fontSize: 13,
-    fontWeight: 500,
-    color: '#fff',
-    cursor: 'pointer',
-    textDecoration: 'none',
-    borderBottom: '1px solid rgba(255,255,255,0.1)',
-  },
-  privacyCorner: {
-    position: 'absolute' as const,
-    bottom: 8,
-    right: 8,
-    color: 'rgba(255,255,255,0.3)',
-    fontSize: 11,
-    textDecoration: 'none',
-    zIndex: 1,
-  },
-  signInButton: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 600,
-    cursor: 'pointer',
-    marginLeft: 4,
-    opacity: 0.8,
-  },
-  userAvatar: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-    overflow: 'hidden',
-    cursor: 'pointer',
-    marginLeft: 4,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(255,255,255,0.2)',
-  },
-  userAvatarImg: {
-    width: 26,
-    height: 26,
-    borderRadius: 13,
-  },
-  userAvatarText: {
-    color: '#fff',
-    fontSize: 12,
-    fontWeight: 700,
-  },
   reportMarker: {
     width: 40,
     height: 40,
@@ -1775,30 +1111,6 @@ const styles: Record<string, React.CSSProperties> = {
     border: '2px solid #fff',
     boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
     animation: 'pulse-dot 1.5s ease-in-out infinite',
-  },
-  dropPinButton: {
-    position: 'absolute',
-    bottom: 16,
-    right: 16,
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    cursor: 'pointer',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
-    zIndex: 2,
-  },
-  dropPinButtonActive: {
-    backgroundColor: '#ff5252',
-  },
-  dropPinText: {
-    color: '#fff',
-    fontSize: 24,
-    fontWeight: 300,
-    lineHeight: '1',
   },
   pinDropBanner: {
     position: 'absolute',
@@ -1991,173 +1303,6 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     flexShrink: 0,
   },
-  commentSignIn: {
-    padding: '10px 16px',
-    fontSize: 13,
-    color: '#2a7cff',
-    cursor: 'pointer',
-    fontWeight: 500,
-    textAlign: 'center' as any,
-  },
-  listToggleButton: {
-    position: 'absolute',
-    bottom: 60,
-    left: 16,
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: 'rgba(30, 30, 30, 0.85)',
-    cursor: 'pointer',
-    boxShadow: '0 2px 6px rgba(0,0,0,0.3)',
-    zIndex: 2,
-  },
-  listToggleText: {
-    color: '#fff',
-    fontSize: 18,
-  },
-  listPanel: {
-    position: 'absolute',
-    bottom: 108,
-    left: 16,
-    width: 340,
-    maxHeight: 'calc(100% - 140px)',
-    backgroundColor: '#fff',
-    borderRadius: 16,
-    zIndex: 50,
-    display: 'flex',
-    flexDirection: 'column',
-    boxShadow: '0 4px 16px rgba(0,0,0,0.15)',
-    overflow: 'hidden',
-  },
-  listHeader: {
-    padding: '20px 20px 16px',
-    borderBottom: '1px solid #eee',
-    display: 'flex',
-    flexDirection: 'column',
-  },
-  listTitle: {
-    fontSize: 22,
-    fontWeight: 700,
-    color: '#1a1a1a',
-  },
-  listSubtitle: {
-    fontSize: 12,
-    color: '#777',
-    marginTop: 3,
-  },
-  listTimeControls: {
-    display: 'flex',
-    flexDirection: 'row',
-    gap: 10,
-    padding: '10px 14px',
-    flexShrink: 0,
-    borderBottom: '1px solid #eee',
-  },
-  listSelectField: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 3,
-    flex: 1,
-    minWidth: 0,
-  },
-  listSelectLabel: {
-    fontSize: 10,
-    fontWeight: 700,
-    color: '#888',
-    textTransform: 'uppercase' as const,
-    letterSpacing: '0.7px',
-  },
-  listSelect: {
-    width: '100%',
-    border: '1px solid #ddd',
-    borderRadius: 10,
-    padding: '9px 10px',
-    backgroundColor: '#fafafa',
-    color: '#222',
-    fontSize: 14,
-    fontWeight: 600,
-    cursor: 'pointer',
-  },
-  listEmpty: {
-    padding: '42px 28px',
-    color: '#777',
-    fontSize: 14,
-    textAlign: 'center' as const,
-  },
-  listScroll: {
-    flex: 1,
-    overflowY: 'auto' as any,
-  },
-  listItem: {
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: '14px 20px',
-    borderBottom: '1px solid #f0f0f0',
-    cursor: 'pointer',
-    transition: 'background-color 0.15s',
-  },
-  listItemDot: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    marginRight: 14,
-    flexShrink: 0,
-  },
-  listItemEmoji: {
-    fontSize: 18,
-  },
-  listItemContent: {
-    flex: 1,
-    minWidth: 0,
-  },
-  listItemTitle: {
-    fontSize: 15,
-    fontWeight: 600,
-    color: '#1a1a1a',
-    marginBottom: 2,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  listItemLocation: {
-    fontSize: 13,
-    color: '#666',
-    marginBottom: 2,
-    whiteSpace: 'nowrap',
-    overflow: 'hidden',
-    textOverflow: 'ellipsis',
-  },
-  listItemMeta: {
-    fontSize: 12,
-    color: '#999',
-  },
-  listItemDistance: {
-    color: '#2a7cff',
-    fontWeight: 600,
-  },
-  listItemInterested: {
-    fontSize: 12,
-    color: '#b8860b',
-    fontWeight: 600,
-    marginLeft: 8,
-    flexShrink: 0,
-  },
-  welcomeBackdrop: {
-    position: 'absolute',
-    inset: 0,
-    backgroundColor: 'rgba(0, 0, 0, 0.6)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1000,
-  },
   welcomeModal: {
     backgroundColor: '#1a1a1a',
     borderRadius: 20,
@@ -2188,40 +1333,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     letterSpacing: 0.5,
   },
-  welcomeSubtitle: {
-    color: 'rgba(255, 255, 255, 0.5)',
-    fontSize: 14,
-    marginBottom: 24,
-  },
-  welcomeCategories: {
-    display: 'flex',
-    flexDirection: 'column',
-    gap: 12,
-    width: '100%',
-    marginBottom: 28,
-  },
-  welcomeRow: {
-    display: 'flex',
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  welcomeSwatch: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  welcomeSwatchEmoji: {
-    fontSize: 16,
-  },
-  welcomeLabel: {
-    color: '#fff',
-    fontSize: 15,
-    fontWeight: 500,
-  },
   welcomeButton: {
     backgroundColor: '#fff',
     color: '#1a1a1a',
@@ -2232,24 +1343,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontWeight: 700,
     cursor: 'pointer',
     letterSpacing: 0.3,
-  },
-  flagButton: {
-    cursor: 'pointer',
-    fontSize: 15,
-    color: '#999',
-    userSelect: 'none',
-  },
-  flagOverlay: {
-    position: 'fixed',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 9999,
   },
   flagMenu: {
     backgroundColor: '#fff',
