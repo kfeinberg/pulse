@@ -2,6 +2,8 @@ import React, { useEffect, useState, useCallback, useRef, useMemo } from 'react'
 import { StyleSheet, View, TouchableOpacity, Text, Alert, Animated, ScrollView, Linking, TextInput, Modal, Image, Platform, AppState, useWindowDimensions } from 'react-native';
 import MapView, { Marker, MapPressEvent, PROVIDER_GOOGLE } from 'react-native-maps';
 import { useFocusEffect, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { filterPanelLayout, FILTER_PANEL_BOTTOM_PADDING, FILTER_PANEL_GAP, FILTER_TOGGLE_SIZE } from '@/utils/filterPanelLayout';
 import { AppEvent, Report, ReportCategory, EventCategory, FlagReason } from '@/types';
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport, deleteAccount, flagContent } from '@/services/firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from '@/services/votes';
@@ -105,7 +107,9 @@ export default function MapScreen() {
   // The browsed instant: null follows the live clock ("Now").
   const [selectedTime, setSelectedTime] = useState<number | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
-  const { height: windowHeight } = useWindowDimensions();
+  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
+  const insets = useSafeAreaInsets();
+  const filterPanel = filterPanelLayout(windowWidth, windowHeight, insets);
   const [mapTimePickerOpen, setMapTimePickerOpen] = useState(false);
   const [mapPickerStep, setMapPickerStep] = useState<'main' | 'day' | 'time'>('main');
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
@@ -626,7 +630,7 @@ export default function MapScreen() {
 
       {/* Category filter toggle + labeled pills */}
       {!selectedEvent && (
-        <View style={styles.filterContainer}>
+        <View style={[styles.filterContainer, { top: filterPanel.top, right: filterPanel.right }]}>
           <TouchableOpacity
             style={styles.filterToggle}
             onPress={() => setFiltersOpen((v) => !v)}
@@ -650,11 +654,14 @@ export default function MapScreen() {
               </View>
             )}
           </TouchableOpacity>
-          {filtersOpen && (
+          {filtersOpen && filterPanel.maxHeight > 0 && (
             <ScrollView
-              style={{ maxHeight: Math.max(240, windowHeight - 240) }}
+              style={[styles.filterPanel, { width: filterPanel.width, maxHeight: filterPanel.maxHeight }]}
               contentContainerStyle={styles.filterList}
-              showsVerticalScrollIndicator={false}
+              contentInsetAdjustmentBehavior="never"
+              automaticallyAdjustsScrollIndicatorInsets={false}
+              showsVerticalScrollIndicator
+              indicatorStyle="white"
             >
               {hiddenCategoryCount > 0 && (
                 <TouchableOpacity
@@ -674,6 +681,7 @@ export default function MapScreen() {
                   <Animated.View
                     key={key}
                     style={{
+                      maxWidth: '100%',
                       opacity: filterAnim,
                       transform: [{
                         scale: filterAnim.interpolate({
@@ -1459,23 +1467,30 @@ const styles = StyleSheet.create({
   },
   filterContainer: {
     position: 'absolute',
-    top: 60,
-    right: 16,
     flexDirection: 'column',
     alignItems: 'flex-end',
-    gap: 8,
+    gap: FILTER_PANEL_GAP,
+  },
+  filterPanel: {
+    flexGrow: 0,
+    backgroundColor: 'rgba(26, 26, 26, 0.93)',
+    borderRadius: 20,
   },
   filterList: {
     alignItems: 'flex-end',
     gap: 8,
-    paddingBottom: 4,
+    paddingHorizontal: 14,
+    paddingTop: 12,
+    paddingBottom: FILTER_PANEL_BOTTOM_PADDING,
   },
   filterRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
+    maxWidth: '100%',
   },
   filterLabel: {
+    flexShrink: 1,
     backgroundColor: 'rgba(30, 30, 30, 0.85)',
     borderRadius: 12,
     paddingHorizontal: 10,
@@ -1529,8 +1544,8 @@ const styles = StyleSheet.create({
     fontWeight: '800',
   },
   filterToggle: {
-    width: 50,
-    height: 50,
+    width: FILTER_TOGGLE_SIZE,
+    height: FILTER_TOGGLE_SIZE,
     borderRadius: 25,
     alignItems: 'center',
     justifyContent: 'center',
