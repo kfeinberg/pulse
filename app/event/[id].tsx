@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback, useMemo } from 'react';
-import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share, ActivityIndicator } from 'react-native';
+import { StyleSheet, View, Text, ScrollView, TouchableOpacity, Linking, TextInput, KeyboardAvoidingView, Platform, Image, Alert, Share, ActivityIndicator, AppState } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { CATEGORIES, ADMIN_EMAIL } from '@/constants/categories';
 import { AppEvent, EventCategory, Comment, FlagReason } from '@/types';
@@ -7,7 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { subscribeToComments, subscribeToEvent, addComment, deleteEvent, flagContent, markInterested } from '@/services/firebase';
 import { getHiddenContent, getInterestedEvents, setHidden, setInterested as setInterestedLocal } from '@/services/votes';
 import { eventStatus, formatEventRange } from '@/utils/eventTime';
-import { eventCategory } from '@/shared/eventCategories';
+import { classifyListing, displayMobileCategory, nycCivilDay, seasonalCategories } from '@/utils/holidaySchedule';
 
 const FLAG_REASONS: { value: FlagReason; label: string }[] = [
   { value: 'spam', label: 'Spam' },
@@ -59,6 +59,9 @@ export default function EventDetailScreen() {
   const [liveEvent, setLiveEvent] = useState<AppEvent | null | undefined>(undefined);
   const [interested, setInterested] = useState(false);
 
+  const todayInNyc = nycCivilDay(currentTime);
+  const activeHolidays = useMemo(() => seasonalCategories(todayInNyc), [todayInNyc]);
+
   // The map passes a snapshot for an instant first render; the live document
   // keeps counts and corrected times current, and serves links that carry
   // only an id (a tapped reminder notification).
@@ -69,7 +72,7 @@ export default function EventDetailScreen() {
     if (!title || startMs === null || endMs === null) return null;
     return {
       title,
-      category: liveEvent?.category ?? eventCategory(params),
+      category: displayMobileCategory(liveEvent ?? classifyListing(params), activeHolidays),
       description: liveEvent?.description ?? params.description ?? '',
       location: liveEvent?.location ?? params.location ?? '',
       startMs,
@@ -81,13 +84,19 @@ export default function EventDetailScreen() {
       longitude: liveEvent?.longitude ?? finiteNumber(params.longitude),
       interestedCount: liveEvent?.interested ?? 0,
     };
-  }, [liveEvent, params]);
+  }, [liveEvent, params, activeHolidays]);
 
   const categoryConfig = event?.category ? CATEGORIES[event.category] : undefined;
 
   useEffect(() => {
     const timer = setInterval(() => setCurrentTime(Date.now()), 60_000);
-    return () => clearInterval(timer);
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setCurrentTime(Date.now());
+    });
+    return () => {
+      clearInterval(timer);
+      subscription.remove();
+    };
   }, []);
 
   useEffect(() => {

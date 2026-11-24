@@ -1,5 +1,5 @@
 import { AppEvent, NewEventInput, Report, Comment, ReportCategory, UserProfile, FlagReason } from '@/types';
-import { eventCategory, storedEventCategory } from '@/shared/eventCategories';
+import { classifyListing, storeMobileCategory } from '@/utils/holidaySchedule';
 import { initializeApp, getApps } from 'firebase/app';
 import {
   type DocumentSnapshot,
@@ -62,14 +62,14 @@ export async function setUserProfile(uid: string, displayName: string, photoURL?
 // Events
 function toAppEvent(snapshot: DocumentSnapshot): AppEvent {
   const data = snapshot.data()!;
-  return { ...data, id: snapshot.id, category: eventCategory(data) } as AppEvent;
+  return { ...data, id: snapshot.id, ...classifyListing(data) } as AppEvent;
 }
 
 export async function addEvent(input: NewEventInput): Promise<string> {
   const docRef = await addDoc(collection(db, EVENTS_COLLECTION), {
     title: input.title,
     description: input.description,
-    ...storedEventCategory(input.category),
+    ...storeMobileCategory(input.category),
     latitude: input.latitude,
     longitude: input.longitude,
     startTime: Timestamp.fromDate(input.startTime),

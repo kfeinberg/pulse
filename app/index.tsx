@@ -6,12 +6,13 @@ import { AppEvent, Report, ReportCategory, EventCategory, FlagReason } from '@/t
 import { subscribeToUpcomingEvents, voteOnEvent, markInterested, subscribeToReports, createReport, confirmReport, deleteEvent, deleteReport, deleteAccount, flagContent } from '@/services/firebase';
 import { getAllVotes, setVote, getInterestedEvents, setInterested as setInterestedLocal, getConfirmedReports, setConfirmed as setConfirmedLocal, getHiddenContent, setHidden, VoteType } from '@/services/votes';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { CATEGORIES, CATEGORY_LIST, NYC_REGION, ADMIN_EMAIL } from '@/constants/categories';
+import { CATEGORIES, NYC_REGION, ADMIN_EMAIL } from '@/constants/categories';
 import { MAP_STYLE } from '@/constants/mapStyle';
 import { useAuth } from '@/contexts/AuthContext';
 import { signOut } from '@/services/auth';
 import { registerForPushNotifications } from '@/services/notifications';
 import { buildTimeline, eventStatus, formatClock, formatDayLabel, formatEventRange, matchesSearch, nextBusySnap } from '@/utils/eventTime';
+import { displayMobileCategory, nycCivilDay, REGULAR_CATEGORIES, seasonalCategories, visibleSelection } from '@/utils/holidaySchedule';
 
 // The native launch screen's image (expo-splash-screen in app.config.js).
 const SPLASH_ART = require('../assets/images/splash-icon.png');
@@ -84,8 +85,14 @@ export default function MapScreen() {
   const [selectedEvent, setSelectedEvent] = useState<AppEvent | null>(null);
   const [votes, setVotes] = useState<Record<string, VoteType>>({});
   const [dataLoaded, setDataLoaded] = useState(false);
-  const [allEvents, setAllEvents] = useState<AppEvent[]>([]);
+  const [storedEvents, setStoredEvents] = useState<AppEvent[]>([]);
   const [currentTime, setCurrentTime] = useState(() => Date.now());
+  const todayInNyc = nycCivilDay(currentTime);
+  const activeHolidays = useMemo(() => seasonalCategories(todayInNyc), [todayInNyc]);
+  const availableCategories = useMemo(() => [...REGULAR_CATEGORIES, ...activeHolidays], [activeHolidays]);
+  const allEvents = useMemo(() => storedEvents.map((event) => ({
+    ...event, category: displayMobileCategory(event, activeHolidays),
+  })), [storedEvents, activeHolidays]);
   const [showWelcome, setShowWelcome] = useState(true);
   const [welcomeChecked, setWelcomeChecked] = useState(false);
   const [splashOpacity] = useState(() => new Animated.Value(1));
@@ -104,8 +111,10 @@ export default function MapScreen() {
   const [listPickerOpen, setListPickerOpen] = useState<'day' | 'time' | null>(null);
   const [filtersOpen, setFiltersOpen] = useState(false);
   const [filterAnim] = useState(() => new Animated.Value(0));
-  const [activeCategories, setActiveCategories] = useState<Set<EventCategory>>(
-    new Set(CATEGORY_LIST)
+  const [chosenCategories, setChosenCategories] = useState<Set<EventCategory> | null>(null);
+  const activeCategories = useMemo(
+    () => visibleSelection(availableCategories, chosenCategories),
+    [availableCategories, chosenCategories]
   );
   const [userLocation, setUserLocation] = useState<{ latitude: number; longitude: number } | null>(null);
   const [interestedMap, setInterestedMap] = useState<Record<string, boolean>>({});
@@ -238,16 +247,16 @@ export default function MapScreen() {
   }, [filtersOpen, filterAnim]);
 
   const toggleCategory = useCallback((cat: EventCategory) => {
-    setActiveCategories((prev) => {
-      const next = new Set(prev);
+    setChosenCategories((prev) => {
+      const next = visibleSelection(availableCategories, prev);
       if (next.has(cat)) {
         if (next.size > 1) next.delete(cat);
       } else {
         next.add(cat);
       }
-      return next;
+      return next.size === availableCategories.length ? null : next;
     });
-  }, []);
+  }, [availableCategories]);
 
   const handleDismissWelcome = useCallback(() => {
     AsyncStorage.setItem(WELCOME_KEY, '1');
@@ -352,7 +361,7 @@ export default function MapScreen() {
     const wasInterested = !!interestedMap[event.id];
     const delta = wasInterested ? -1 : 1;
 
-    setAllEvents((prev) => prev.map((e) =>
+    setStoredEvents((prev) => prev.map((e) =>
       e.id === event.id ? { ...e, interested: (e.interested ?? 0) + delta } : e
     ));
     setEvents((prev) => prev.map((e) =>
@@ -392,7 +401,7 @@ export default function MapScreen() {
 
     try {
       unsubscribe = subscribeToUpcomingEvents((upcoming) => {
-        setAllEvents(upcoming);
+        setStoredEvents(upcoming);
         setDataLoaded(true);
       });
     } catch (e) {
@@ -423,7 +432,7 @@ export default function MapScreen() {
     // Clear selected event if it's no longer visible
     setSelectedEvent((prev) => {
       if (!prev) return null;
-      return filtered.find((e) => e.id === prev.id) ? prev : null;
+      return filtered.find((event) => event.id === prev.id) ?? null;
     });
   }, [allEvents, mapSelectedTime, activeCategories]);
 
@@ -516,7 +525,7 @@ export default function MapScreen() {
     () => reports.filter((report) => !hiddenMap[report.id] && (report.expiresAt?.toMillis?.() ?? 0) > currentTime),
     [reports, hiddenMap, currentTime]
   );
-  const hiddenCategoryCount = CATEGORY_LIST.length - activeCategories.size;
+  const hiddenCategoryCount = availableCategories.length - activeCategories.size;
 
   const eventsForMap = useMemo(() => {
     if (!selectedEvent || events.some((event) => event.id === selectedEvent.id)) return events;
@@ -624,7 +633,7 @@ export default function MapScreen() {
             activeOpacity={0.7}
             accessibilityRole="button"
             accessibilityLabel={filtersOpen ? 'Close category filters' : 'Filter categories'}
-            accessibilityHint={hiddenCategoryCount > 0 ? `${hiddenCategoryCount} of ${CATEGORY_LIST.length} categories are hidden` : undefined}
+            accessibilityHint={hiddenCategoryCount > 0 ? `${hiddenCategoryCount} of ${availableCategories.length} categories are hidden` : undefined}
           >
             {filtersOpen ? (
               <Text style={styles.filterToggleIcon}>✕</Text>
@@ -650,7 +659,7 @@ export default function MapScreen() {
               {hiddenCategoryCount > 0 && (
                 <TouchableOpacity
                   style={styles.filterShowAll}
-                  onPress={() => setActiveCategories(new Set(CATEGORY_LIST))}
+                  onPress={() => setChosenCategories(null)}
                   activeOpacity={0.7}
                   accessibilityRole="button"
                   accessibilityLabel="Show all categories"
@@ -658,7 +667,7 @@ export default function MapScreen() {
                   <Text style={styles.filterShowAllText}>Show all</Text>
                 </TouchableOpacity>
               )}
-              {CATEGORY_LIST.map((key) => {
+              {availableCategories.map((key) => {
                 const cat = CATEGORIES[key];
                 const active = activeCategories.has(key);
                 return (
@@ -682,7 +691,7 @@ export default function MapScreen() {
                     <TouchableOpacity
                       style={styles.filterRow}
                       onPress={() => toggleCategory(key)}
-                      onLongPress={() => setActiveCategories(new Set([key]))}
+                      onLongPress={() => setChosenCategories(new Set([key]))}
                       activeOpacity={0.7}
                       accessibilityRole="button"
                       accessibilityLabel={cat.label}
@@ -1372,7 +1381,7 @@ export default function MapScreen() {
             </View>
             <Text style={styles.welcomeSubtitle}>{"What's happening in NYC right now"}</Text>
             <View style={styles.welcomeCategories}>
-              {CATEGORY_LIST.map((key) => {
+              {availableCategories.map((key) => {
                 const cat = CATEGORIES[key];
                 return (
                   <View key={key} style={styles.welcomeRow}>

@@ -1,7 +1,7 @@
 import { Timestamp } from 'firebase/firestore';
 
-import type { EventCategory } from '@/shared/eventCategories';
-export type { EventCategory } from '@/shared/eventCategories';
+import type { HolidayCategory, MobileEventCategory } from '@/utils/holidaySchedule';
+export type EventCategory = MobileEventCategory;
 
 export interface AppEvent {
   id: string;
@@ -9,6 +9,7 @@ export interface AppEvent {
   description: string;
   location?: string;
   category: EventCategory;
+  holiday?: HolidayCategory;
   latitude: number;
   longitude: number;
   startTime: Timestamp;

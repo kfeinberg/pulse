@@ -15,7 +15,7 @@ import MapView, { Marker, MapPressEvent } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { addEvent } from '@/services/firebase';
 import { EventCategory } from '@/types';
-import { CATEGORIES, CATEGORY_LIST, NYC_REGION } from '@/constants/categories';
+import { CATEGORIES, ADMIN_CATEGORY_LIST, NYC_REGION } from '@/constants/categories';
 import { MAP_STYLE } from '@/constants/mapStyle';
 
 export default function AdminScreen() {
@@ -149,7 +149,7 @@ export default function AdminScreen() {
 
         <Text style={styles.label}>Category</Text>
         <View style={styles.categoryRow}>
-          {CATEGORY_LIST.map((cat) => {
+          {ADMIN_CATEGORY_LIST.map((cat) => {
             const config = CATEGORIES[cat];
             const selected = category === cat;
             return (

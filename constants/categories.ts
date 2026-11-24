@@ -1,4 +1,4 @@
-import { CHRISTMAS_CATEGORY, EVENT_CATEGORIES, type EventCategory } from '@/shared/eventCategories';
+import { HOLIDAY_CATEGORIES, HOLIDAY_KEYS, REGULAR_CATEGORIES, type MobileEventCategory } from '@/utils/holidaySchedule';
 
 interface CategoryConfig {
   label: string;
@@ -7,7 +7,7 @@ interface CategoryConfig {
   backgroundColor: string;
 }
 
-export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
+export const CATEGORIES: Record<MobileEventCategory, CategoryConfig> = {
   popup: {
     label: 'Pop-up',
     emoji: '🎪',
@@ -62,10 +62,11 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
     color: '#00838F',
     backgroundColor: '#E0F7FA',
   },
-  christmas: CHRISTMAS_CATEGORY,
+  ...HOLIDAY_CATEGORIES,
 };
 
-export const CATEGORY_LIST: readonly EventCategory[] = EVENT_CATEGORIES;
+// Admins can tag listings ahead of the season; discovery uses the live schedule.
+export const ADMIN_CATEGORY_LIST: readonly MobileEventCategory[] = [...REGULAR_CATEGORIES, ...HOLIDAY_KEYS];
 
 export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 
