@@ -7,6 +7,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { subscribeToComments, subscribeToEvent, addComment, deleteEvent, flagContent, markInterested } from '@/services/firebase';
 import { getHiddenContent, getInterestedEvents, setHidden, setInterested as setInterestedLocal } from '@/services/votes';
 import { eventStatus, formatEventRange } from '@/utils/eventTime';
+import { eventCategory } from '@/shared/eventCategories';
 
 const FLAG_REASONS: { value: FlagReason; label: string }[] = [
   { value: 'spam', label: 'Spam' },
@@ -68,7 +69,7 @@ export default function EventDetailScreen() {
     if (!title || startMs === null || endMs === null) return null;
     return {
       title,
-      category: (liveEvent?.category ?? params.category) as EventCategory | undefined,
+      category: liveEvent?.category ?? eventCategory(params),
       description: liveEvent?.description ?? params.description ?? '',
       location: liveEvent?.location ?? params.location ?? '',
       startMs,

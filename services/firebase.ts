@@ -1,6 +1,8 @@
 import { AppEvent, NewEventInput, Report, Comment, ReportCategory, UserProfile, FlagReason } from '@/types';
+import { eventCategory, storedEventCategory } from '@/shared/eventCategories';
 import { initializeApp, getApps } from 'firebase/app';
 import {
+  type DocumentSnapshot,
   Timestamp,
   addDoc,
   collection,
@@ -58,11 +60,16 @@ export async function setUserProfile(uid: string, displayName: string, photoURL?
 }
 
 // Events
+function toAppEvent(snapshot: DocumentSnapshot): AppEvent {
+  const data = snapshot.data()!;
+  return { ...data, id: snapshot.id, category: eventCategory(data) } as AppEvent;
+}
+
 export async function addEvent(input: NewEventInput): Promise<string> {
   const docRef = await addDoc(collection(db, EVENTS_COLLECTION), {
     title: input.title,
     description: input.description,
-    category: input.category,
+    ...storedEventCategory(input.category),
     latitude: input.latitude,
     longitude: input.longitude,
     startTime: Timestamp.fromDate(input.startTime),
@@ -82,11 +89,7 @@ export function subscribeToUpcomingEvents(
     orderBy('endTime', 'asc')
   );
   const unsubscribe = onSnapshot(q, (snapshot) => {
-    const events: AppEvent[] = snapshot.docs.map((d) => ({
-      id: d.id,
-      ...d.data(),
-    })) as AppEvent[];
-    callback(events);
+    callback(snapshot.docs.map(toAppEvent));
   });
   return unsubscribe;
 }
@@ -103,7 +106,7 @@ export function subscribeToEvent(
 ): () => void {
   return onSnapshot(
     doc(db, EVENTS_COLLECTION, eventId),
-    (snapshot) => callback(snapshot.exists() ? ({ id: snapshot.id, ...snapshot.data() } as AppEvent) : null),
+    (snapshot) => callback(snapshot.exists() ? toAppEvent(snapshot) : null),
     (error) => console.warn('Event subscription failed:', error)
   );
 }

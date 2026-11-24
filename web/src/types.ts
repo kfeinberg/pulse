@@ -1,6 +1,7 @@
 import { Timestamp } from 'firebase/firestore';
 
-export type EventCategory = 'popup' | 'free_stuff' | 'happening' | 'professional' | 'bars' | 'clubs' | 'concerts' | 'farmers_market' | 'street_fair' | 'trick_or_treat';
+import type { EventCategory } from '../../shared/eventCategories';
+export type { EventCategory } from '../../shared/eventCategories';
 
 export type ReportCategory = 'live_music' | 'free_stuff' | 'popup' | 'long_line' | 'street_performance' | 'other';
 

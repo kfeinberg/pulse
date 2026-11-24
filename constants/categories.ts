@@ -1,4 +1,4 @@
-import { EventCategory } from '@/types';
+import { CHRISTMAS_CATEGORY, EVENT_CATEGORIES, type EventCategory } from '@/shared/eventCategories';
 
 interface CategoryConfig {
   label: string;
@@ -62,15 +62,10 @@ export const CATEGORIES: Record<EventCategory, CategoryConfig> = {
     color: '#00838F',
     backgroundColor: '#E0F7FA',
   },
-  trick_or_treat: {
-    label: 'Trick-or-Treat',
-    emoji: '🎃',
-    color: '#D84315',
-    backgroundColor: '#FBE9E7',
-  },
+  christmas: CHRISTMAS_CATEGORY,
 };
 
-export const CATEGORY_LIST: EventCategory[] = ['popup', 'free_stuff', 'happening', 'professional', 'bars', 'clubs', 'concerts', 'farmers_market', 'street_fair', 'trick_or_treat'];
+export const CATEGORY_LIST: readonly EventCategory[] = EVENT_CATEGORIES;
 
 export const ADMIN_EMAIL = 'kalli.feinberg@gmail.com';
 

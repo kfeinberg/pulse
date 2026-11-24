@@ -26,6 +26,7 @@ import {
 } from 'firebase/auth';
 import { getFunctions, httpsCallable } from 'firebase/functions';
 import { AppEvent, Comment, Report, ReportCategory, UserProfile, FlagReason } from './types';
+import { eventCategory } from '../../shared/eventCategories';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY,
@@ -70,10 +71,10 @@ export function subscribeToUpcomingEvents(
   );
 
   const unsubscribe = onSnapshot(q, (snapshot) => {
-    const events: AppEvent[] = snapshot.docs.map((doc) => ({
-      id: doc.id,
-      ...doc.data(),
-    })) as AppEvent[];
+    const events = snapshot.docs.map((doc) => {
+      const data = doc.data();
+      return { ...data, id: doc.id, category: eventCategory(data) } as AppEvent;
+    });
     callback(events);
   });
 
